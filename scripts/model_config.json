@@ -1,0 +1,71 @@
+{
+  "download_sources": {
+    "huggingface": {
+      "enabled": true,
+      "base_url": "https://huggingface.co",
+      "api_token": null
+    },
+    "git_lfs": {
+      "enabled": true,
+      "repositories": {
+        "Qwen3-Omni-30B-A3B-Thinking": "Qwen/Qwen3-Omni-30B-A3B-Thinking",
+        "Microsoft-VibeVoice-1.5B": "Microsoft/VibeVoice-1.5B",
+        "MERaLiON-AudioLLM-Whisper-SEA-LION": "MERaLiON/MERaLiON-AudioLLM-Whisper-SEA-LION"
+      }
+    }
+  },
+  "download_options": {
+    "max_retries": 3,
+    "timeout": 3600,
+    "chunk_size": 1048576,
+    "verify_checksum": true,
+    "parallel_downloads": 2
+  },
+  "system_requirements": {
+    "min_memory_gb": {
+      "Qwen3-Omni-30B-A3B-Thinking": 32,
+      "Microsoft-VibeVoice-1.5B": 4,
+      "MERaLiON-AudioLLM-Whisper-SEA-LION": 6
+    },
+    "gpu_required": {
+      "Qwen3-Omni-30B-A3B-Thinking": true,
+      "Microsoft-VibeVoice-1.5B": false,
+      "MERaLiON-AudioLLM-Whisper-SEA-LION": false
+    }
+  },
+  "models": {
+    "Qwen3-Omni-30B-A3B-Thinking": {
+      "name": "Qwen3-Omni-30B-A3B-Thinking",
+      "description": "Advanced reasoning model for mathematical problem solving with thinking capabilities",
+      "file_size_gb": 58.0,
+      "memory_required_gb": 32.0,
+      "gpu_required": true,
+      "quantization_supported": true,
+      "languages": ["en", "zh", "es", "fr", "de", "ja", "ko"],
+      "special_features": ["chain_of_thought", "mathematical_reasoning", "step_by_step"],
+      "download_url": "https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Thinking"
+    },
+    "Microsoft-VibeVoice-1.5B": {
+      "name": "Microsoft-VibeVoice-1.5B",
+      "description": "Natural sounding text-to-speech model with educational voice optimization",
+      "file_size_gb": 3.2,
+      "memory_required_gb": 4.0,
+      "gpu_required": false,
+      "quantization_supported": true,
+      "languages": ["en", "zh", "es", "fr", "de", "ja", "ko"],
+      "special_features": ["educational_tone", "clarity", "mathematical_pronunciation"],
+      "download_url": "https://huggingface.co/Microsoft/VibeVoice-1.5B"
+    },
+    "MERaLiON-AudioLLM-Whisper-SEA-LION": {
+      "name": "MERaLiON-AudioLLM-Whisper-SEA-LION",
+      "description": "Enhanced speech recognition model optimized for Southeast Asian languages and educational content",
+      "file_size_gb": 2.8,
+      "memory_required_gb": 6.0,
+      "gpu_required": false,
+      "quantization_supported": true,
+      "languages": ["en", "zh", "ms", "id", "th", "vi", "tl", "ja", "ko"],
+      "special_features": ["educational_content", "mathematical_terms", "classroom_noise_filtering"],
+      "download_url": "https://huggingface.co/MERaLiON/MERaLiON-AudioLLM-Whisper-SEA-LION"
+    }
+  }
+}
