@@ -1,0 +1,41 @@
+# Curated Python runtime dependencies for the Cloud Agent (Linux) dev environment.
+#
+# This is the subset of src/backend/requirements.txt that the FastAPI backend
+# actually imports at module load / runtime. The remaining packages in
+# requirements.txt (openai-whisper, coqui-tts, easyocr, opencv-python,
+# pytesseract, pyaudio, pywin32, pyinstaller, ...) are only needed to download
+# and run the large on-demand AI model weights (Qwen3-Omni, VibeVoice, etc.),
+# which are lazy-loaded and are not required to run the app end to end.
+#
+# NOTE: `torch` is installed separately from the CPU wheel index in install.sh.
+
+# Core web framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+websockets==12.0
+python-multipart==0.0.6
+aiofiles==23.2.1
+
+# Configuration / validation
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# Math / science (SymPy powers the symbolic-computation fallback solver)
+numpy==1.26.4
+sympy>=1.12
+scipy>=1.11.0
+Pillow>=10.0.0
+antlr4-python3-runtime==4.11.0
+
+# Audio libraries imported at module load by the audio services
+soundfile==0.12.1
+librosa==0.10.1
+
+# ML runtime imported at module load (transformers); torch via CPU index in install.sh
+transformers>=4.36.0
+
+# Utilities
+requests==2.31.0
+psutil==5.9.6
+loguru==0.7.2
