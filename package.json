@@ -1,60 +1,50 @@
 {
   "name": "ai-math-tutor-desktop",
   "version": "1.0.0",
-  "description": "Windows-based multimodal AI math tutor application with Electron, React, and Python FastAPI backend",
+  "description": "Desktop AI math tutor: Electron + React renderer, Python FastAPI backend with a SymPy engine and optional local models",
   "main": "src/main/main.js",
   "homepage": "./",
+  "private": true,
   "scripts": {
-    "start": "electron .",
-    "dev": "concurrently \"npm run dev:react\" \"wait-on http://localhost:3000 && electron .\"",
-    "dev:react": "cd src/renderer && REACT_APP_BACKEND_URL=http://localhost:8000 npm start",
-    "build": "npm run build:react && electron-builder --windows",
-    "build:react": "cd src/renderer && npm run build",
     "postinstall": "cd src/renderer && npm install",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder --windows",
-    "start:backend": "cd src/backend && python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000",
-    "dev:backend": "cd src/backend && python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000",
-    "install:python-deps": "cd src/backend && pip install -r requirements.txt",
-    "setup:models": "python src/backend/scripts/setup_models.py",
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "lint": "eslint src --ext .js,.jsx,.ts,.tsx",
-    "lint:fix": "eslint src --ext .js,.jsx,.ts,.tsx --fix"
+    "start": "electron .",
+    "dev": "concurrently -k -n react,electron -c cyan,magenta \"npm run dev:react\" \"wait-on http://localhost:3000 && electron .\"",
+    "dev:react": "cd src/renderer && cross-env BROWSER=none REACT_APP_BACKEND_URL=http://127.0.0.1:8000 npm start",
+    "dev:backend": "cd src/backend && python main.py",
+    "build:react": "cd src/renderer && npm run build",
+    "build": "npm run build:react && electron-builder --windows",
+    "pack": "npm run build:react && electron-builder --dir",
+    "dist": "npm run build",
+    "typecheck": "cd src/renderer && npx tsc --noEmit -p .",
+    "lint": "cd src/renderer && npm run lint",
+    "test": "npm run test:backend && npm run test:renderer",
+    "test:backend": "cd src/backend && python -m pytest -q",
+    "test:renderer": "cd src/renderer && cross-env CI=true npm test -- --watchAll=false --passWithNoTests",
+    "install:python-deps": "cd src/backend && pip install -r requirements.txt -r requirements-dev.txt",
+    "install:python-ml": "cd src/backend && pip install -r requirements-ml.txt",
+    "setup:models": "python scripts/setup_models.py"
   },
   "keywords": [
     "electron",
     "react",
-    "ai",
-    "math-tutor",
-    "windows",
     "fastapi",
+    "sympy",
+    "math-tutor",
     "fabricjs",
-    "whisper",
-    "xtts",
-    "qwen",
-    "sympy"
+    "qwen"
   ],
   "author": "AI Math Tutor Team",
   "license": "MIT",
   "devDependencies": {
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
     "electron": "^28.1.0",
     "electron-builder": "^24.9.1",
-    "concurrently": "^8.2.2",
-    "wait-on": "^7.2.0",
-    "eslint": "^8.55.0",
-    "eslint-plugin-react": "^7.33.2",
-    "eslint-plugin-react-hooks": "^4.6.0",
-    "jest": "^29.7.0",
-    "@testing-library/jest-dom": "^6.1.5",
-    "@testing-library/react": "^14.1.2"
+    "wait-on": "^7.2.0"
   },
   "dependencies": {
-    "electron-updater": "^6.1.7",
     "electron-log": "^4.4.8",
-    "electron-store": "^8.1.0",
-    "ws": "^8.14.2",
-    "isomorphic-ws": "^5.0.0"
+    "electron-store": "^8.1.0"
   },
   "build": {
     "appId": "com.aimathtutor.desktop",
@@ -66,39 +56,50 @@
     "files": [
       "src/main/**/*",
       "src/renderer/build/**/*",
-      "src/backend/**/*",
-      "assets/**/*",
-      "node_modules/**/*"
+      "package.json"
     ],
     "extraResources": [
       {
         "from": "src/backend",
         "to": "backend",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/.pytest_cache/**",
+          "!tests/**",
+          "!data/**",
+          "!logs/**",
+          "!models/**",
+          "!temp/**",
+          "!uploads/**",
+          "!.env"
+        ]
       },
       {
-        "from": "models",
-        "to": "models",
-        "filter": ["**/*"]
-      },
-      {
-        "from": "models",
-        "to": "models"
+        "from": "scripts",
+        "to": "scripts",
+        "filter": [
+          "*.py",
+          "*.json"
+        ]
       }
     ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
-      "icon": "build/icon.ico",
-      "publisherName": "AI Math Tutor Inc."
+      "icon": "assets/icon.ico"
     },
     "nsis": {
       "oneClick": false,
@@ -110,15 +111,6 @@
     },
     "portable": {
       "artifactName": "AI-Math-Tutor-Portable.exe"
-    }
-  },
-  "jest": {
-    "testEnvironment": "jsdom",
-    "setupFilesAfterEnv": [
-      "@testing-library/jest-dom"
-    ],
-    "moduleNameMapping": {
-      "\\.(css|less|scss|sass)$": "identity-obj-proxy"
     }
   }
 }

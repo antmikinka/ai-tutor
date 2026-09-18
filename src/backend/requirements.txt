@@ -25,8 +25,5 @@ Pillow>=10.0
 # System metrics (optional at runtime, but cheap)
 psutil>=5.9
 
-# Used by start_app.py for the health probe
-requests>=2.31
-
 # Windows integration
 pywin32>=306; sys_platform == 'win32'
