@@ -198,7 +198,7 @@ def t_speed(rng, difficulty):
     speed = rng.choice([40, 45, 50, 60, 70, 80, 90])
     hours = _n(rng, 2, 7)
     dist = speed * hours
-    eq = f"v*{hours} = {dist}"
+    eq = f"{hours}*v = {dist}"
     return Generated(
         f"A train covers {dist} km in {hours} hours at a constant speed. What is its speed in km/h?",
         eq, "v", str(speed), "Distance = speed × time",
