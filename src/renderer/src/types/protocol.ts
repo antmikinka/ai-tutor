@@ -53,7 +53,9 @@ export interface Capabilities {
   symbolic_solver: boolean;
   /** A language model (local Qwen3-Omni or a configured OpenAI-compatible endpoint) is available. */
   llm: boolean;
+  /** `provider:model`, e.g. `qwen3-omni:...`, `openrouter:openai/gpt-4o-mini`, `ollama:llama3.1`. */
   llm_name?: string | null;
+  llm_mode?: 'auto' | 'local' | 'remote';
   speech: boolean;
   drawing_recognition: boolean;
   knowledge_base?: boolean;
@@ -78,6 +80,8 @@ interface Envelope {
 
 export type InboundMessage =
   | (Envelope & { type: 'connected'; client_id: string; server_version: string; capabilities: Capabilities })
+  /** Pushed when a capability changes mid-session (e.g. the language model source was switched). */
+  | (Envelope & { type: 'capabilities'; capabilities: Capabilities })
   | (Envelope & { type: 'pong' })
   | (Envelope & { type: 'math_solution'; solution: BackendSolution })
   | (Envelope & { type: 'verification'; data: BackendVerification })

@@ -13,6 +13,7 @@ import {
   Typography,
 } from '@mui/material';
 import { styled } from '@mui/material/styles';
+import { describeLLMName } from '../lib/llm';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
@@ -65,11 +66,7 @@ const confidenceMeta = (confidence: number) => {
   return { color: 'error' as const, icon: <ErrorIcon fontSize="small" />, label: 'Low' };
 };
 
-const humanModel = (modelUsed: string) => {
-  if (modelUsed === 'sympy') return 'Symbolic engine (SymPy)';
-  if (modelUsed === 'none') return 'No engine could answer';
-  return modelUsed.replace(/^llm:/, 'AI model: ');
-};
+const humanModel = (modelUsed: string) => describeLLMName(modelUsed);
 
 const SourceIcon: React.FC<{ source: 'text' | 'voice' | 'drawing' | 'image' }> = ({ source }) => {
   if (source === 'voice') return <MicIcon fontSize="inherit" />;

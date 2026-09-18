@@ -113,7 +113,14 @@ export const MathTutorPage: React.FC = () => {
       push({ kind: 'user', text: content, source });
       setIsProcessing(true);
       try {
-        const metadata = { enable_tts: settings.audioSettings.enableTextToSpeech, source };
+        const metadata = {
+          enable_tts: settings.audioSettings.enableTextToSpeech,
+          source,
+          enable_step_by_step: settings.displaySettings.showStepByStep,
+          enable_thinking: settings.modelSettings.enableThinking,
+          temperature: settings.modelSettings.temperature,
+          max_tokens: settings.modelSettings.maxTokens,
+        };
         let solution: BackendSolution;
         if (connectionStatus === 'connected') {
           const reply = await request({ type: 'math_input', content, metadata }, 'math_solution');

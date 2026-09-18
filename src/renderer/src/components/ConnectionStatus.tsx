@@ -5,6 +5,7 @@ import ErrorIcon from '@mui/icons-material/Error';
 import SyncIcon from '@mui/icons-material/Sync';
 import CloudOffIcon from '@mui/icons-material/CloudOff';
 import { useWebSocketContext } from '../contexts/WebSocketContext';
+import { describeLLMName } from '../lib/llm';
 
 const STATUS_META = {
   connected: { label: 'Backend connected', color: 'success' as const, icon: <CheckCircleIcon fontSize="small" /> },
@@ -46,7 +47,7 @@ const ConnectionStatus: React.FC<ConnectionStatusProps> = ({ compact = false }) 
         : null;
   const tooltip =
     connectionStatus === 'connected'
-      ? `Symbolic solver ready${capabilities?.llm ? ' · AI model loaded' : ' · AI model not loaded'}`
+      ? `Symbolic solver ready · ${capabilities?.llm ? describeLLMName(capabilities.llm_name) : 'no language model (symbolic engine only)'}`
       : processHint || lastError || meta.label;
 
   return (

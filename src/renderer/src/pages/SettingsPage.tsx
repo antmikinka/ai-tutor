@@ -26,6 +26,7 @@ import { CheckCircle, Delete, Download, ErrorOutline, Memory, Mic, Monitor, Refr
 import { styled } from '@mui/material/styles';
 import { useNavigate } from 'react-router-dom';
 import { useSettingsContext } from '../contexts/SettingsContext';
+import { LanguageModelSection } from '../components/LanguageModelSection';
 import { ApiError, apiFetch } from '../lib/backend';
 import type { BackendModel, BackendModelStatus, KnowledgeStatus, PracticeStatus, SystemResources, UserSettings } from '../types/MathTypes';
 
@@ -336,14 +337,17 @@ export const SettingsPage: React.FC = () => {
               </Stack>
               {learning && !learning.practice.llm_available && (
                 <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-                  To have word problems written by a language model, either load the reasoning model below or set <code>LLM_API_BASE_URL</code> (and optionally <code>LLM_API_KEY</code>, <code>LLM_API_MODEL</code>) for the backend to any OpenAI-compatible endpoint — OpenAI, Ollama, LM Studio, vLLM. Every generated
-                  problem is still checked by the symbolic engine before you see it.
+                  To have word problems written by a language model, load the local reasoning model or connect an API provider such as OpenRouter in the “Language model” section below. Every generated problem is still checked by the
+                  symbolic engine before you see it.
                 </Typography>
               )}
             </Grid>
           </Grid>
         </CardContent>
       </Section>
+
+      {/* ---- Language model source ---- */}
+      <LanguageModelSection onToast={setToast} />
 
       {/* ---- Audio ---- */}
       <Section>
@@ -506,7 +510,7 @@ export const SettingsPage: React.FC = () => {
 
       {/* ---- Generation ---- */}
       <Section>
-        <CardHeader avatar={<Memory />} title="Language model generation" subheader="Only used when a reasoning model is loaded" />
+        <CardHeader avatar={<Memory />} title="Generation options" subheader="Apply to whichever language model is active" />
         <CardContent>
           <Grid container spacing={3}>
             <Grid item xs={12} md={6}>

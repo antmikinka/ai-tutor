@@ -10,6 +10,7 @@ import {
   Divider,
   FormControl,
   InputLabel,
+  Link,
   MenuItem,
   Paper,
   Select,
@@ -26,7 +27,9 @@ import { BlockMath } from 'react-katex';
 import 'katex/dist/katex.min.css';
 import { CourseMaterialPanel } from '../components/CourseMaterialPanel';
 import { useSettingsContext } from '../contexts/SettingsContext';
+import { useWebSocketContext } from '../contexts/WebSocketContext';
 import { ApiError, apiFetch, apiJson } from '../lib/backend';
+import { describeLLMName } from '../lib/llm';
 import type { KnowledgeDocument, PracticeCheck, PracticeDifficulty, PracticeProblem, PracticeSolution, PracticeStats, PracticeStatus } from '../types/MathTypes';
 import type { WhiteboardHandoff } from './MathTutorPage';
 
@@ -74,6 +77,7 @@ export const PracticePage: React.FC = () => {
   const navigate = useNavigate();
   const { settings, updatePracticeSettings } = useSettingsContext();
   const { practiceSettings } = settings;
+  const { capabilities } = useWebSocketContext();
 
   const [status, setStatus] = useState<PracticeStatus | null>(null);
   const [topic, setTopic] = useState('');
@@ -93,14 +97,16 @@ export const PracticePage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const answerRef = useRef<HTMLInputElement>(null);
 
+  // Re-read status when the language model source changes (backend pushes new capabilities).
+  const llmName = capabilities?.llm_name ?? null;
   useEffect(() => {
     apiFetch<PracticeStatus>('/api/practice/status')
       .then((s) => {
         setStatus(s);
-        setStats(s.stats);
+        setStats((prev) => prev ?? s.stats);
       })
       .catch((err) => setError(describe(err)));
-  }, []);
+  }, [llmName]);
 
   const difficulty = practiceSettings.difficulty;
   const setDifficulty = (d: PracticeDifficulty) => void updatePracticeSettings({ difficulty: d });
@@ -409,7 +415,10 @@ export const PracticePage: React.FC = () => {
           )}
           {status && (
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
-              Problem writer: {status.llm_available ? `language model (${status.llm}) with engine verification` : 'verified templates (no language model configured)'}.
+              Problem writer: {status.llm_available ? `${describeLLMName(status.llm)} with engine verification` : 'verified templates (no language model active)'}.{' '}
+              <Link component="button" type="button" variant="caption" onClick={() => navigate('/settings')}>
+                Change
+              </Link>
             </Typography>
           )}
         </Paper>

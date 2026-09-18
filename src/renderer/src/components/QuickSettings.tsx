@@ -15,9 +15,11 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { BrightnessAuto, DarkMode, Grid4x4, GridOff, Highlight, LightMode, Tune } from '@mui/icons-material';
+import { Bolt, BrightnessAuto, Cloud, Computer, DarkMode, Grid4x4, GridOff, Highlight, LightMode, Tune } from '@mui/icons-material';
 import { useSettingsContext } from '../contexts/SettingsContext';
-import type { WhiteboardGrid } from '../types/MathTypes';
+import { useLLMConfig } from '../hooks/useLLMConfig';
+import { describeLLMName } from '../lib/llm';
+import type { LLMMode, WhiteboardGrid } from '../types/MathTypes';
 
 const Row: React.FC<{ label: string; checked: boolean; onChange: (checked: boolean) => void }> = ({ label, checked, onChange }) => (
   <FormControlLabel
@@ -38,6 +40,26 @@ export const QuickSettings: React.FC<{ color?: 'inherit' | 'default' }> = ({ col
   const [anchor, setAnchor] = useState<null | HTMLElement>(null);
   const { settings, updateDisplaySettings, updateWhiteboardSettings, updateAudioSettings, updatePracticeSettings } = useSettingsContext();
   const { displaySettings, whiteboardSettings, audioSettings, practiceSettings } = settings;
+  const open = Boolean(anchor);
+  const llm = useLLMConfig(open);
+  const [switching, setSwitching] = useState(false);
+
+  const setMode = async (mode: LLMMode) => {
+    if (!llm.config || llm.config.mode === mode) return;
+    setSwitching(true);
+    try {
+      await llm.update({ mode });
+    } catch {
+      // error surfaces through llm.error
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  const goToSettings = () => {
+    setAnchor(null);
+    navigate('/settings');
+  };
 
   return (
     <>
@@ -55,6 +77,52 @@ export const QuickSettings: React.FC<{ color?: 'inherit' | 'default' }> = ({ col
         slotProps={{ paper: { sx: { width: 300, p: 2 } } }}
       >
         <Stack spacing={1.5}>
+          <Box>
+            <Typography variant="overline" color="text.secondary">
+              AI source
+            </Typography>
+            <ToggleButtonGroup
+              fullWidth
+              size="small"
+              exclusive
+              value={llm.config?.mode ?? 'auto'}
+              disabled={!llm.config || switching}
+              onChange={(_, v: LLMMode | null) => v && void setMode(v)}
+              sx={{ mt: 0.5 }}
+            >
+              <ToggleButton value="auto" aria-label="Automatic AI source">
+                <Bolt fontSize="small" sx={{ mr: 0.5 }} /> Auto
+              </ToggleButton>
+              <ToggleButton value="local" aria-label="Local model only">
+                <Computer fontSize="small" sx={{ mr: 0.5 }} /> Local
+              </ToggleButton>
+              <ToggleButton value="remote" aria-label="API provider (OpenRouter)">
+                <Cloud fontSize="small" sx={{ mr: 0.5 }} /> API
+              </ToggleButton>
+            </ToggleButtonGroup>
+            <Typography variant="caption" color={llm.config?.active.backend ? 'text.secondary' : 'warning.main'} sx={{ display: 'block', mt: 0.5, px: 0.5 }} noWrap title={llm.config?.active.name ?? undefined}>
+              {llm.error
+                ? 'Backend unreachable'
+                : !llm.config
+                  ? 'Loading…'
+                  : llm.config.active.name
+                    ? describeLLMName(llm.config.active.name)
+                    : llm.config.mode === 'local'
+                      ? 'No local model loaded'
+                      : 'No API provider set up'}
+              {llm.config && !llm.config.active.backend && (
+                <>
+                  {' · '}
+                  <Typography component="button" type="button" variant="caption" onClick={goToSettings} sx={{ p: 0, border: 0, background: 'none', color: 'primary.main', cursor: 'pointer', font: 'inherit' }}>
+                    set up
+                  </Typography>
+                </>
+              )}
+            </Typography>
+          </Box>
+
+          <Divider />
+
           <Box>
             <Typography variant="overline" color="text.secondary">
               Appearance
@@ -145,14 +213,7 @@ export const QuickSettings: React.FC<{ color?: 'inherit' | 'default' }> = ({ col
             />
           </Box>
 
-          <Button
-            size="small"
-            variant="outlined"
-            onClick={() => {
-              setAnchor(null);
-              navigate('/settings');
-            }}
-          >
+          <Button size="small" variant="outlined" onClick={goToSettings}>
             All settings
           </Button>
         </Stack>

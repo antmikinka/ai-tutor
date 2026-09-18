@@ -34,6 +34,24 @@ class NoLanguageModelError(RuntimeError):
     """Raised when a request needs an LLM and none (local or remote) is available."""
 
 
+def _clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def _as_float(value: Any) -> Optional[float]:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(value: Any, default: int) -> int:
+    try:
+        return default if value is None else int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class AIService:
     """Mathematical problem solving: SymPy first, LLM when available."""
 
@@ -187,7 +205,15 @@ class AIService:
     # Generic text generation (routed by the user's LLM mode)
     # ------------------------------------------------------------------ #
 
-    async def complete(self, system: str, user: str, *, json_mode: bool = False, max_tokens: int = 1024) -> str:
+    async def complete(
+        self,
+        system: str,
+        user: str,
+        *,
+        json_mode: bool = False,
+        max_tokens: int = 1024,
+        temperature: Optional[float] = None,
+    ) -> str:
         """Return raw model text for a prompt, or raise NoLanguageModelError."""
         if self.local_allowed:
             await self._attach_loaded_llm()
@@ -200,16 +226,18 @@ class AIService:
             try:
                 return await self.remote_llm.chat(
                     [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                    temperature=self.settings.ai_temperature,
-                    max_tokens=max_tokens,
+                    temperature=self.settings.ai_temperature if temperature is None else _clamp(temperature, 0.0, 2.0),
+                    max_tokens=_clamp(int(max_tokens), 64, 8192),
                     json_mode=json_mode,
                 )
             except LLMClientError as exc:
                 raise NoLanguageModelError(str(exc)) from exc
         raise NoLanguageModelError(self._no_llm_message())
 
-    async def complete_json(self, system: str, user: str, *, max_tokens: int = 1024) -> Dict[str, Any]:
-        text = await self.complete(system, user, json_mode=True, max_tokens=max_tokens)
+    async def complete_json(
+        self, system: str, user: str, *, max_tokens: int = 1024, temperature: Optional[float] = None
+    ) -> Dict[str, Any]:
+        text = await self.complete(system, user, json_mode=True, max_tokens=max_tokens, temperature=temperature)
         try:
             return extract_json_object(text)
         except ValueError as exc:
@@ -350,7 +378,12 @@ class AIService:
     async def _solve_with_remote_llm(self, problem: str, context: Dict[str, Any], started: float) -> Dict[str, Any]:
         """Word problems via the configured OpenAI-compatible endpoint, cross-checked with SymPy."""
         try:
-            data = await self.complete_json(self._WORD_PROBLEM_SYSTEM, f"Problem: {problem}")
+            data = await self.complete_json(
+                self._WORD_PROBLEM_SYSTEM,
+                f"Problem: {problem}",
+                max_tokens=_as_int(context.get("max_tokens"), self.settings.ai_max_tokens),
+                temperature=_as_float(context.get("temperature")),
+            )
         except NoLanguageModelError as exc:
             logger.error("Remote LLM failed: %s", exc)
             return self._unsolved_response(problem, f"language model error: {exc}", started)

@@ -68,8 +68,8 @@ const FEATURES = [
     icon: <QuestionAnswer />,
     title: 'Language model (optional)',
     description:
-      'Load the local Qwen3-Omni model, or point the backend at any OpenAI-compatible endpoint (OpenAI, Ollama, LM Studio, vLLM) with LLM_API_BASE_URL, to solve free-form word problems and write richer practice problems. Every model answer is cross-checked by the symbolic engine.',
-    tags: ['Local or remote', 'Engine cross-check'],
+      'Pick the source in Settings → Language model (or the AI-source toggle in Quick settings): the local Qwen3-Omni model, OpenRouter, OpenAI, Ollama, LM Studio or any OpenAI-compatible endpoint, or Auto (local when loaded, otherwise the API). It solves free-form word problems and writes richer practice problems; every model answer is cross-checked by the symbolic engine.',
+    tags: ['Local / OpenRouter / API', 'Auto fallback', 'Engine cross-check'],
   },
   {
     icon: <Mic />,
@@ -82,7 +82,7 @@ const FEATURES = [
 const FAQ = [
   {
     q: 'Why does it say "I couldn\'t interpret that as a math problem"?',
-    a: 'The built-in engine understands mathematical expressions and a small set of instructions (solve, derivative, integrate, limit, simplify, factor, expand). Free-form word problems need a language model: load Qwen3-Omni from Settings, or configure an OpenAI-compatible endpoint for the backend with LLM_API_BASE_URL.',
+    a: 'The built-in engine understands mathematical expressions and a small set of instructions (solve, derivative, integrate, limit, simplify, factor, expand). Free-form word problems need a language model: load Qwen3-Omni from Settings, or connect OpenRouter / another API provider under Settings → Language model. The Quick settings toggle switches between Local, API and Auto at any time.',
   },
   {
     q: 'How does Practice use my course material?',
@@ -99,6 +99,10 @@ const FAQ = [
   {
     q: 'How do I check my own answer?',
     a: 'After the tutor solves a problem, press "Check my own answer" under the input, type your answer (for example x = 2 or x = 3) and send. The engine compares it symbolically, so equivalent forms count as correct.',
+  },
+  {
+    q: 'Where does my API key go, and what is sent to the provider?',
+    a: 'The key is saved on this computer only (in the backend data folder, readable by your user account) and is sent solely to the provider base URL you configured. When the API answers a question, the problem text is sent; for practice generation, the retrieved passages from your course material are included so the problem matches what you are studying. In "Local" mode nothing leaves your machine.',
   },
   {
     q: 'What does the confidence badge mean?',

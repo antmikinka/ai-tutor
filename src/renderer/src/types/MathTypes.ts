@@ -221,6 +221,71 @@ export interface PracticeStatus {
   stats: PracticeStats;
 }
 
+// ---- language model source (/api/llm) -------------------------------------
+
+export type LLMMode = 'auto' | 'local' | 'remote';
+export type LLMPresetId = 'openrouter' | 'openai' | 'ollama' | 'lmstudio' | 'custom' | (string & {});
+
+export interface LLMPreset {
+  id: LLMPresetId;
+  label: string;
+  base_url: string;
+  needs_key: boolean;
+  key_url: string | null;
+  default_model: string;
+  description: string;
+  local: boolean;
+}
+
+export interface LLMRemoteConfig {
+  preset: LLMPresetId;
+  base_url: string;
+  model: string;
+  timeout_seconds: number;
+  has_api_key: boolean;
+  api_key_hint: string | null;
+  configured: boolean;
+}
+
+export interface LLMConfig {
+  mode: LLMMode;
+  remote: LLMRemoteConfig;
+  presets: LLMPreset[];
+  config_path: string;
+  active: { backend: 'local' | 'remote' | null; name: string | null };
+  local: { ready: boolean; model: string; ml_stack: boolean; allowed: boolean };
+  remote_active: boolean;
+}
+
+export interface LLMConfigUpdate {
+  mode?: LLMMode;
+  preset?: LLMPresetId;
+  base_url?: string;
+  api_key?: string;
+  clear_api_key?: boolean;
+  model?: string;
+  timeout_seconds?: number;
+}
+
+export interface LLMModelInfo {
+  id: string;
+  name: string;
+  context_length: number | null;
+  prompt_price: number | null;
+  completion_price: number | null;
+  free: boolean | null;
+  recommended: boolean;
+}
+
+export interface LLMTestResult {
+  ok: boolean;
+  error: string | null;
+  reply?: string;
+  latency_ms: number;
+  model: string;
+  provider: string;
+}
+
 // ---- backend model management (GET /api/models) -------------------------
 
 export type BackendModelStatus = 'loaded' | 'loading' | 'error' | 'unavailable' | 'available' | 'not_downloaded';

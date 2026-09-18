@@ -135,7 +135,7 @@ export const useWebSocket = () => {
         console.warn('Ignoring non-JSON WebSocket frame');
         return;
       }
-      if (parsed.type === 'connected') setCapabilities(parsed.capabilities);
+      if (parsed.type === 'connected' || parsed.type === 'capabilities') setCapabilities(parsed.capabilities);
       dispatch(parsed);
     };
 

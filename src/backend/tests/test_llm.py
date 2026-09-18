@@ -318,6 +318,11 @@ def test_llm_api_config_roundtrip(client, monkeypatch):
 
     listing = client.get("/api/llm/models").json()
     assert listing["provider"] == "openrouter" and listing["count"] == 2 and listing["models"][0]["id"] == "openai/gpt-4o-mini"
+    # Listing for an unsaved provider (form values) works too and does not touch the saved config.
+    proposed = client.post("/api/llm/models", json={"preset": "ollama"}).json()
+    assert proposed["provider"] == "ollama" and proposed["base_url"] == "http://localhost:11434/v1" and proposed["count"] == 2
+    assert client.get("/api/llm/config").json()["remote"]["preset"] == "openrouter"
+    assert client.post("/api/llm/models", json={"preset": "custom", "base_url": ""}).status_code == 400
 
     tested = client.post("/api/llm/test", json={"model": "b/model"}).json()
     assert tested["ok"] is True and tested["model"] == "b/model" and tested["provider"] == "openrouter"
