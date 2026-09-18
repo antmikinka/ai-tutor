@@ -18,7 +18,9 @@ from api.websocket_manager import WebSocketManager
 from services.ai_service import AIService
 from services.audio_service import AudioService
 from services.drawing_service import DrawingService
+from services.knowledge_service import KnowledgeService
 from services.model_service import ModelService
+from services.practice_service import PracticeService
 
 logger = logging.getLogger(__name__)
 
@@ -30,18 +32,24 @@ class ServiceContainer:
     audio_service: AudioService
     drawing_service: DrawingService
     model_service: ModelService
+    knowledge_service: KnowledgeService
+    practice_service: PracticeService
     websocket_manager: WebSocketManager = field(default_factory=WebSocketManager)
 
     @classmethod
     def create(cls, settings: Optional[Settings] = None) -> "ServiceContainer":
         settings = settings or get_settings()
         model_service = ModelService(settings)
+        ai_service = AIService(settings, model_service=model_service)
+        knowledge_service = KnowledgeService(settings)
         return cls(
             settings=settings,
-            ai_service=AIService(settings, model_service=model_service),
+            ai_service=ai_service,
             audio_service=AudioService(settings),
             drawing_service=DrawingService(settings),
             model_service=model_service,
+            knowledge_service=knowledge_service,
+            practice_service=PracticeService(settings, knowledge=knowledge_service, ai=ai_service),
         )
 
     async def start(self) -> None:
@@ -51,6 +59,8 @@ class ServiceContainer:
             ("ai_service", self.ai_service),
             ("drawing_service", self.drawing_service),
             ("audio_service", self.audio_service),
+            ("knowledge_service", self.knowledge_service),
+            ("practice_service", self.practice_service),
         ):
             try:
                 await service.initialize()
@@ -60,6 +70,8 @@ class ServiceContainer:
     async def stop(self) -> None:
         await self.websocket_manager.close_all()
         for name, service in (
+            ("practice_service", self.practice_service),
+            ("knowledge_service", self.knowledge_service),
             ("audio_service", self.audio_service),
             ("ai_service", self.ai_service),
             ("drawing_service", self.drawing_service),
@@ -102,6 +114,14 @@ def get_drawing_service() -> DrawingService:
 
 def get_model_service() -> ModelService:
     return get_container().model_service
+
+
+def get_knowledge_service() -> KnowledgeService:
+    return get_container().knowledge_service
+
+
+def get_practice_service() -> PracticeService:
+    return get_container().practice_service
 
 
 def get_websocket_manager() -> WebSocketManager:

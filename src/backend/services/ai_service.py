@@ -19,6 +19,7 @@ from typing import Any, Deque, Dict, List, Optional
 from config.settings import get_settings
 from services import math_engine
 from services.common import utc_now_iso
+from services.llm_client import LLMClientError, RemoteLLMClient, extract_json_object
 from services.math_engine import MathParseError
 from services.optional_deps import HAS_ML_STACK, ml_stack_status
 
@@ -28,6 +29,10 @@ SYMBOLIC_ENGINE = "sympy"
 LLM_ENGINE_PREFIX = "qwen3-omni"
 
 
+class NoLanguageModelError(RuntimeError):
+    """Raised when a request needs an LLM and none (local or remote) is available."""
+
+
 class AIService:
     """Mathematical problem solving: SymPy first, LLM when available."""
 
@@ -35,6 +40,14 @@ class AIService:
         self.settings = settings or get_settings()
         self.model_service = model_service
         self.qwen3_service = None
+        self.remote_llm: Optional[RemoteLLMClient] = None
+        if self.settings.remote_llm_configured:
+            self.remote_llm = RemoteLLMClient(
+                self.settings.llm_api_base_url,
+                self.settings.llm_api_key,
+                self.settings.llm_api_model,
+                self.settings.llm_api_timeout_seconds,
+            )
         self.is_initialized = False
         self._history: Deque[Dict[str, Any]] = deque(maxlen=self.settings.solution_history_size)
         self._stats = {"solved": 0, "failed": 0, "verified": 0, "total_confidence": 0.0}
@@ -55,6 +68,8 @@ class AIService:
                 self.qwen3_service = None
         else:
             logger.info("ML stack not installed; AI service runs with the symbolic engine only")
+        if self.remote_llm is not None:
+            logger.info("Remote LLM endpoint configured: %s (%s)", self.settings.llm_api_base_url, self.remote_llm.model)
         self.is_initialized = True
 
     async def cleanup(self) -> None:
@@ -63,6 +78,8 @@ class AIService:
                 await self.qwen3_service.cleanup()
             except Exception as exc:
                 logger.error("Error cleaning up Qwen3-Omni service: %s", exc)
+        if self.remote_llm is not None:
+            await self.remote_llm.close()
         self.is_initialized = False
 
     def is_healthy(self) -> bool:
@@ -70,9 +87,51 @@ class AIService:
 
     @property
     def llm_ready(self) -> bool:
-        """True only when a real language model is loaded (not 'limited mode')."""
+        """True only when a real local language model is loaded (not 'limited mode')."""
         svc = self.qwen3_service
         return bool(svc is not None and svc.is_initialized and getattr(svc, "model", None) is not None)
+
+    @property
+    def any_llm_available(self) -> bool:
+        return self.llm_ready or self.remote_llm is not None
+
+    @property
+    def llm_name(self) -> Optional[str]:
+        if self.llm_ready:
+            return f"{LLM_ENGINE_PREFIX}:{self.settings.ai_model_name}"
+        if self.remote_llm is not None:
+            return self.remote_llm.name
+        return None
+
+    # ------------------------------------------------------------------ #
+    # Generic text generation (local model first, remote endpoint second)
+    # ------------------------------------------------------------------ #
+
+    async def complete(self, system: str, user: str, *, json_mode: bool = False, max_tokens: int = 1024) -> str:
+        """Return raw model text for a prompt, or raise NoLanguageModelError."""
+        await self._attach_loaded_llm()
+        if self.llm_ready:
+            prompt = f"{system}\n\n{user}"
+            result = await self.qwen3_service._generate_solution(prompt, "generic")  # noqa: SLF001 - shared wrapper API
+            return result.get("generated_text", "")
+        if self.remote_llm is not None:
+            try:
+                return await self.remote_llm.chat(
+                    [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    temperature=self.settings.ai_temperature,
+                    max_tokens=max_tokens,
+                    json_mode=json_mode,
+                )
+            except LLMClientError as exc:
+                raise NoLanguageModelError(str(exc)) from exc
+        raise NoLanguageModelError("No language model is available (load Qwen3-Omni or configure LLM_API_BASE_URL).")
+
+    async def complete_json(self, system: str, user: str, *, max_tokens: int = 1024) -> Dict[str, Any]:
+        text = await self.complete(system, user, json_mode=True, max_tokens=max_tokens)
+        try:
+            return extract_json_object(text)
+        except ValueError as exc:
+            raise NoLanguageModelError(f"Language model did not return JSON: {exc}") from exc
 
     async def _attach_loaded_llm(self) -> None:
         """Bind the Qwen3 wrapper to a reasoning model the user loaded via ModelService."""
@@ -99,6 +158,8 @@ class AIService:
             "symbolic_engine": SYMBOLIC_ENGINE,
             "llm_ready": self.llm_ready,
             "llm_model": self.settings.ai_model_name if self.llm_ready else None,
+            "remote_llm": self.remote_llm.name if self.remote_llm else None,
+            "llm_available": self.any_llm_available,
             "ml_stack": ml_stack_status(),
             "problems_solved": self._stats["solved"],
         }
@@ -130,6 +191,8 @@ class AIService:
             await self._attach_loaded_llm()
             if self.llm_ready:
                 response = await self._solve_with_llm(problem, context, started)
+            elif self.remote_llm is not None:
+                response = await self._solve_with_remote_llm(problem, context, started)
             else:
                 response = self._unsolved_response(problem, str(exc), started)
         except asyncio.TimeoutError:
@@ -190,13 +253,72 @@ class AIService:
             "timestamp": utc_now_iso(),
         }
 
+    _WORD_PROBLEM_SYSTEM = (
+        "You are a patient math tutor. Translate the student's problem into mathematics, solve it, and reply "
+        "with ONLY a JSON object: {\"equation\": string (a single equation or expression the symbolic engine can "
+        "solve, e.g. '3*x + 5 = 20' or 'derivative of x^2'), \"variable\": string|null, \"solution\": string "
+        "(final answer), \"steps\": [string], \"problem_type\": string, \"confidence\": number 0-1}. "
+        "Use ^ for powers, * for multiplication, sqrt(), pi, E. No prose outside the JSON."
+    )
+
+    async def _solve_with_remote_llm(self, problem: str, context: Dict[str, Any], started: float) -> Dict[str, Any]:
+        """Word problems via the configured OpenAI-compatible endpoint, cross-checked with SymPy."""
+        try:
+            data = await self.complete_json(self._WORD_PROBLEM_SYSTEM, f"Problem: {problem}")
+        except NoLanguageModelError as exc:
+            logger.error("Remote LLM failed: %s", exc)
+            return self._unsolved_response(problem, f"language model error: {exc}", started)
+
+        steps = [str(s) for s in data.get("steps", []) if str(s).strip()]
+        solution = str(data.get("solution", "")).strip()
+        confidence = float(data.get("confidence", 0.6) or 0.6)
+        problem_type = str(data.get("problem_type", "word_problem"))
+        equation = str(data.get("equation", "")).strip()
+        solution_latex = ""
+        verification = {"is_correct": None, "confidence": 0.0, "method": "llm"}
+
+        # If the model gave us an equation the engine understands, let the engine have the final word.
+        if equation:
+            try:
+                engine = await self._run_symbolic(math_engine.solve, equation)
+                steps = [f"Model the problem: {equation}"] + list(engine.steps)
+                if solution and math_engine.verify(equation, solution)["is_correct"]:
+                    verification = {"is_correct": True, "confidence": 0.95, "method": "symbolic"}
+                else:
+                    verification = {"is_correct": True, "confidence": 0.9, "method": "symbolic-corrected"}
+                solution = engine.solution
+                solution_latex = engine.solution_latex
+                confidence = max(confidence, 0.85)
+            except (MathParseError, asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
+                logger.debug("Engine could not check LLM equation %r: %s", equation, exc)
+
+        return {
+            "id": str(uuid.uuid4()),
+            "problem": problem,
+            "solution": solution or "The model did not produce a final answer.",
+            "solution_latex": solution_latex,
+            "steps": steps,
+            "thinking_process": [],
+            "confidence": confidence if solution else 0.0,
+            "problem_type": problem_type,
+            "variable": data.get("variable"),
+            "processing_time": time.perf_counter() - started,
+            "model_used": self.remote_llm.name if self.remote_llm else "remote",
+            "tokens_used": 0,
+            "verification": verification,
+            "timestamp": utc_now_iso(),
+        }
+
     def _unsolved_response(self, problem: str, reason: str, started: float) -> Dict[str, Any]:
         hints = [
             "Write the expression with explicit operators, e.g. 'solve 2x + 3 = 7' or 'derivative of x^2 * sin(x)'.",
             "Supported commands: solve, simplify, factor, expand, derivative, integrate (optionally 'from a to b'), limit ... as x -> a.",
         ]
-        if not self.llm_ready:
-            hints.append("Load the Qwen3-Omni model from Settings to get help with word problems and free-form questions.")
+        if not self.any_llm_available:
+            hints.append(
+                "For word problems, load the Qwen3-Omni model from Settings or point LLM_API_BASE_URL at an "
+                "OpenAI-compatible endpoint (OpenAI, Ollama, LM Studio, ...)."
+            )
         return {
             "id": str(uuid.uuid4()),
             "problem": problem,

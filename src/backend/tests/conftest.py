@@ -20,6 +20,8 @@ def settings(tmp_path_factory):
         log_dir=root / "logs",
         upload_dir=root / "uploads",
         temp_dir=root / "temp",
+        knowledge_dir=root / "data" / "knowledge",
+        knowledge_embedding="hashing",  # never download a model in tests
         ai_use_gpu=False,
         preload_models=False,
         log_level="WARNING",

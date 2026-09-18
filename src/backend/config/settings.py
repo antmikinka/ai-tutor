@@ -71,6 +71,22 @@ class Settings(BaseSettings):
     # Off by default so the desktop app is usable immediately without the ML stack.
     preload_models: bool = False
 
+    # Optional OpenAI-compatible chat endpoint (OpenAI, Azure, Ollama, LM Studio,
+    # vLLM, ...). Used for word problems / practice generation when no local
+    # reasoning model is loaded. Off unless a base URL is configured.
+    llm_api_base_url: Optional[str] = None  # e.g. https://api.openai.com/v1 or http://localhost:11434/v1
+    llm_api_key: Optional[str] = None
+    llm_api_model: str = "gpt-4o-mini"
+    llm_api_timeout_seconds: float = 60.0
+
+    # Course-material knowledge base (Chroma vector store)
+    knowledge_dir: Optional[Path] = None  # defaults to <data_dir>/knowledge
+    knowledge_embedding: str = "auto"  # auto | minilm | hashing
+    knowledge_chunk_chars: int = 900
+    knowledge_chunk_overlap_chars: int = 150
+    knowledge_max_upload_bytes: int = 25 * 1024 * 1024
+    knowledge_max_document_chars: int = 2_000_000
+
     # Whisper Settings (Speech-to-Text)
     whisper_model: str = "base"  # Options: tiny, base, small, medium, large
     whisper_language: str = "en"
@@ -132,7 +148,15 @@ class Settings(BaseSettings):
     def _resolve_derived_values(self) -> "Settings":
         if self.ai_device is None:
             self.ai_device = "cuda" if self.ai_use_gpu else "cpu"
+        if self.knowledge_dir is None:
+            self.knowledge_dir = Path(self.data_dir) / "knowledge"
+        if self.llm_api_base_url:
+            self.llm_api_base_url = self.llm_api_base_url.rstrip("/")
         return self
+
+    @property
+    def remote_llm_configured(self) -> bool:
+        return bool(self.llm_api_base_url)
 
     def ensure_directories(self) -> None:
         """Create the runtime directories the backend writes to."""
@@ -143,6 +167,7 @@ class Settings(BaseSettings):
             self.log_dir,
             self.upload_dir,
             self.temp_dir,
+            self.knowledge_dir,
         ):
             Path(directory).mkdir(parents=True, exist_ok=True)
 

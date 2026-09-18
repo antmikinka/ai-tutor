@@ -25,5 +25,10 @@ Pillow>=10.0
 # System metrics (optional at runtime, but cheap)
 psutil>=5.9
 
+# Course-material knowledge base and practice generation
+chromadb>=1.0          # vector store; falls back to a local numpy store if missing
+pypdf>=4.0             # PDF text extraction for uploaded course material
+httpx>=0.27            # optional OpenAI-compatible LLM endpoint
+
 # Windows integration
 pywin32>=306; sys_platform == 'win32'

@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config.settings import Settings, get_settings  # noqa: E402
 from api.dependencies import ServiceContainer, get_container, set_container  # noqa: E402
-from api.routes import audio_api, drawing_api, math_api, model_api, system_api  # noqa: E402
+from api.routes import audio_api, drawing_api, knowledge_api, math_api, model_api, practice_api, system_api  # noqa: E402
 from services.common import utc_now_iso  # noqa: E402
 from services.drawing_service import DrawingDecodeError  # noqa: E402
 
@@ -138,6 +138,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(drawing_api.router, prefix="/api/drawing", tags=["Drawing"])
     app.include_router(system_api.router, prefix="/api/system", tags=["System"])
     app.include_router(model_api.router, prefix="/api", tags=["Models"])
+    app.include_router(knowledge_api.router, prefix="/api/knowledge", tags=["Knowledge"])
+    app.include_router(practice_api.router, prefix="/api/practice", tags=["Practice"])
 
     _register_core_routes(app)
     return app
@@ -156,6 +158,8 @@ def _register_core_routes(app: FastAPI) -> None:
                 "audio_service": container.audio_service.is_healthy(),
                 "drawing_service": container.drawing_service.is_healthy(),
                 "model_service": container.model_service.is_healthy(),
+                "knowledge_service": container.knowledge_service.is_healthy(),
+                "practice_service": container.practice_service.is_healthy(),
             },
             "websocket_connections": container.websocket_manager.get_connection_count(),
         }
@@ -240,9 +244,12 @@ async def handle_websocket(websocket: WebSocket, client_id: str) -> None:
             "server_version": settings.version,
             "capabilities": {
                 "symbolic_solver": True,
-                "llm": container.ai_service.llm_ready,
+                "llm": container.ai_service.any_llm_available,
+                "llm_name": container.ai_service.llm_name,
                 "speech": bool(getattr(container.audio_service, "meralion_service", None)),
                 "drawing_recognition": container.ai_service.llm_ready,
+                "knowledge_base": container.knowledge_service.is_healthy(),
+                "practice": container.practice_service.is_healthy(),
             },
             "timestamp": utc_now_iso(),
         },

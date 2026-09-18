@@ -82,6 +82,16 @@ def _service_states(container: ServiceContainer) -> Dict[str, Dict[str, Any]]:
             "loaded_models": list(getattr(container.model_service, "models", {}).keys()),
             "description": "Model download/load management",
         },
+        "knowledge_service": {
+            **container.knowledge_service.status(),
+            "healthy": container.knowledge_service.is_healthy(),
+            "description": "Course-material embedding index (Chroma)",
+        },
+        "practice_service": {
+            **container.practice_service.status(),
+            "healthy": container.practice_service.is_healthy(),
+            "description": "Word-problem generation, answer checking and hints",
+        },
         "websocket": {
             "healthy": True,
             "active_connections": container.websocket_manager.get_connection_count(),
