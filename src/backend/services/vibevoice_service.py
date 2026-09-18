@@ -21,6 +21,7 @@ else:  # pragma: no cover
     AutoProcessor = AutoModelForTextToWaveform = None
 
 from config.settings import get_settings
+from services.common import utc_now_iso
 from services.model_config import ModelConfig, ModelType
 
 logger = logging.getLogger(__name__)
@@ -164,7 +165,7 @@ class VibeVoiceService:
                 "volume": volume,
                 "processing_time": processing_time,
                 "text_length": len(text),
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -345,7 +346,7 @@ class VibeVoiceService:
                 "optimized": True,
                 "optimizations_applied": optimization_options,
                 "processing_time": optimization_time,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:

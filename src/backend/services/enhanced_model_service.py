@@ -31,6 +31,7 @@ else:  # pragma: no cover
     AutoModelForSpeechSeq2Seq = AutoProcessor = pipeline = AutoModelForTextToWaveform = None
 
 from config.settings import get_settings
+from services.common import utc_now_iso
 from services.model_config import (
     ModelRegistry, ModelConfig, ModelInstance, ModelStatus, ModelType,
     get_model_registry
@@ -191,7 +192,7 @@ class EnhancedModelService:
                 return {
                     "model_name": model_name,
                     "status": "not_loaded",
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": utc_now_iso()
                 }
 
             instance = self.models[model_name]
@@ -222,7 +223,7 @@ class EnhancedModelService:
                 "model_name": model_name,
                 "status": "unloaded",
                 "memory_freed_mb": memory_before,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -257,7 +258,7 @@ class EnhancedModelService:
                     "languages": config.languages,
                     "special_features": config.special_features
                 },
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -333,7 +334,7 @@ class EnhancedModelService:
                 "old_model": old_model,
                 "new_model": new_model_name,
                 "status": "switched",
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -429,7 +430,7 @@ class EnhancedModelService:
                 "status": "optimized",
                 "optimizations_applied": instance.optimization_applied,
                 "memory_usage_mb": instance.memory_usage_mb,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -669,7 +670,7 @@ class EnhancedModelService:
                 "model_used": instance.config.name,
                 "model_type": instance.config.type.value,
                 "processing_time": time.time() - start_time,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -726,7 +727,7 @@ class EnhancedModelService:
             "device": instance.device,
             "memory_usage_mb": instance.memory_usage_mb,
             "loading_time": loading_time,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utc_now_iso()
         }
 
     async def _scan_models(self):

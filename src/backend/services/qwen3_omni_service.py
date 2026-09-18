@@ -20,6 +20,7 @@ else:  # pragma: no cover - exercised only without the ML stack
     AutoTokenizer = AutoModelForCausalLM = GenerationConfig = None
 
 from config.settings import get_settings
+from services.common import utc_now_iso
 from services.model_config import ModelConfig, ModelType
 
 logger = logging.getLogger(__name__)
@@ -141,7 +142,7 @@ class Qwen3OmniService:
                 "processing_time": processing_time,
                 "model_used": "Qwen3-Omni-30B-A3B-Thinking",
                 "tokens_used": solution_data.get("tokens_used", 0),
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -185,7 +186,7 @@ class Qwen3OmniService:
                 "explanation": explanation,
                 "type": explanation_type,
                 "processing_time": processing_time,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -226,7 +227,7 @@ class Qwen3OmniService:
                 "analysis": analysis_result,
                 "confidence": analysis_data.get("confidence", 0.0),
                 "processing_time": processing_time,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -268,7 +269,7 @@ class Qwen3OmniService:
                 "difficulty": difficulty,
                 "problems": problems[:count],
                 "processing_time": processing_time,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
