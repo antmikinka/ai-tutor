@@ -51,9 +51,13 @@ export interface DrawingAnalysis {
 
 export interface Capabilities {
   symbolic_solver: boolean;
+  /** A language model (local Qwen3-Omni or a configured OpenAI-compatible endpoint) is available. */
   llm: boolean;
+  llm_name?: string | null;
   speech: boolean;
   drawing_recognition: boolean;
+  knowledge_base?: boolean;
+  practice?: boolean;
 }
 
 // ---- outbound ------------------------------------------------------------

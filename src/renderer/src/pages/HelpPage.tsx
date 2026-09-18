@@ -54,14 +54,22 @@ const FEATURES = [
   {
     icon: <Edit />,
     title: 'Whiteboard',
-    description: 'Sketch working, diagrams or equations with pen, shapes and text. Undo/redo, export as PNG or PDF.',
-    tags: ['Vector canvas', 'Undo/redo', 'Export'],
+    description: 'Sketch working, diagrams or equations with pen, shapes and text; select, move and delete objects; optional dot or square grid. Undo/redo, export as PNG or PDF.',
+    tags: ['Vector canvas', 'Tool hotkeys', 'Grid', 'Export'],
+  },
+  {
+    icon: <School />,
+    title: 'Practice (learn by doing)',
+    description:
+      'Upload lecture notes or a textbook chapter and the tutor writes word problems from that material. Set up the equation yourself, check your answer, ask for hints, then compare with the modelling equation and worked solution.',
+    tags: ['Chroma course index', 'Engine-verified problems', 'Hints & streaks'],
   },
   {
     icon: <QuestionAnswer />,
-    title: 'AI model (optional)',
-    description: 'Load the Qwen3-Omni reasoning model from Settings to handle word problems, free-form questions and handwriting recognition.',
-    tags: ['Requires GPU + ML stack', 'Local only'],
+    title: 'Language model (optional)',
+    description:
+      'Load the local Qwen3-Omni model, or point the backend at any OpenAI-compatible endpoint (OpenAI, Ollama, LM Studio, vLLM) with LLM_API_BASE_URL, to solve free-form word problems and write richer practice problems. Every model answer is cross-checked by the symbolic engine.',
+    tags: ['Local or remote', 'Engine cross-check'],
   },
   {
     icon: <Mic />,
@@ -74,7 +82,15 @@ const FEATURES = [
 const FAQ = [
   {
     q: 'Why does it say "I couldn\'t interpret that as a math problem"?',
-    a: 'The built-in engine understands mathematical expressions and a small set of instructions (solve, derivative, integrate, limit, simplify, factor, expand). Free-form word problems need the optional Qwen3-Omni model, which you can load from Settings when the ML stack is installed.',
+    a: 'The built-in engine understands mathematical expressions and a small set of instructions (solve, derivative, integrate, limit, simplify, factor, expand). Free-form word problems need a language model: load Qwen3-Omni from Settings, or configure an OpenAI-compatible endpoint for the backend with LLM_API_BASE_URL.',
+  },
+  {
+    q: 'How does Practice use my course material?',
+    a: 'Uploaded files are split into passages and embedded into a local Chroma index (all-MiniLM-L6-v2 when it can be downloaded, otherwise an offline hashing embedder). When you ask for a problem, the most relevant passages are retrieved and handed to the problem writer. If a language model is available it writes a fresh word problem plus its equation, which the symbolic engine must be able to solve before you see it; otherwise a verified template that matches the topic is used.',
+  },
+  {
+    q: 'Do I have to type the answer in a particular form?',
+    a: 'No. Enter a number, a fraction, an expression, or "x = 12". Equivalent forms count. If your value solves the equation but does not fit the situation (for example a negative length), you will be told exactly that.',
   },
   {
     q: 'Why is the microphone or drawing recognition disabled?',
@@ -96,6 +112,10 @@ const FAQ = [
 
 const SHORTCUTS = [
   ['Enter', 'Send the problem (Shift+Enter for a new line)'],
+  ['P / E / V / T', 'Pen · Eraser · Select · Text'],
+  ['L / R / O', 'Line · Rectangle · Ellipse'],
+  ['Del / Backspace', 'Delete the selected objects'],
+  ['Esc', 'Deselect'],
   ['Ctrl + Z', 'Undo on the whiteboard'],
   ['Ctrl + Y', 'Redo on the whiteboard'],
   ['Ctrl + S', 'Export the transcript as text'],

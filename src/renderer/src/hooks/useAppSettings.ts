@@ -37,6 +37,17 @@ export const defaultSettings: UserSettings = {
     showModelInfo: true,
     showPerformanceMetrics: false,
   },
+  whiteboardSettings: {
+    grid: 'dots',
+    penColor: '#1a237e',
+    penWidth: 3,
+    showShortcutHints: true,
+  },
+  practiceSettings: {
+    difficulty: 'medium',
+    showEquationImmediately: false,
+    preferLanguageModel: true,
+  },
   modelConfig: {
     reasoningModel: 'Qwen3-Omni-30B-A3B-Thinking',
     ttsModel: 'Microsoft-VibeVoice-1.5B',
@@ -59,6 +70,8 @@ const mergeSettings = (base: UserSettings, patch: Partial<UserSettings> | null |
   audioSettings: { ...base.audioSettings, ...(patch?.audioSettings || {}) },
   modelSettings: { ...base.modelSettings, ...(patch?.modelSettings || {}) },
   displaySettings: { ...base.displaySettings, ...(patch?.displaySettings || {}) },
+  whiteboardSettings: { ...base.whiteboardSettings, ...(patch?.whiteboardSettings || {}) },
+  practiceSettings: { ...base.practiceSettings, ...(patch?.practiceSettings || {}) },
   modelConfig: {
     ...base.modelConfig,
     ...(patch?.modelConfig || {}),
@@ -154,6 +167,16 @@ export const useAppSettings = () => {
     (modelConfig: Partial<UserSettings['modelConfig']>) => updateSettings({ modelConfig: modelConfig as UserSettings['modelConfig'] }),
     [updateSettings],
   );
+  const updateWhiteboardSettings = useCallback(
+    (whiteboardSettings: Partial<UserSettings['whiteboardSettings']>) =>
+      updateSettings({ whiteboardSettings: whiteboardSettings as UserSettings['whiteboardSettings'] }),
+    [updateSettings],
+  );
+  const updatePracticeSettings = useCallback(
+    (practiceSettings: Partial<UserSettings['practiceSettings']>) =>
+      updateSettings({ practiceSettings: practiceSettings as UserSettings['practiceSettings'] }),
+    [updateSettings],
+  );
 
   useEffect(() => {
     loadSettings();
@@ -170,6 +193,8 @@ export const useAppSettings = () => {
     updateModelSettings,
     updateDisplaySettings,
     updateModelConfig,
+    updateWhiteboardSettings,
+    updatePracticeSettings,
   };
 };
 

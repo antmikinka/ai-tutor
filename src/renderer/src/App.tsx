@@ -5,6 +5,7 @@ import { ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import { MainLayout } from './components/layout/MainLayout';
 import { MathTutorPage } from './pages/MathTutorPage';
+import { PracticePage } from './pages/PracticePage';
 import { SettingsPage } from './pages/SettingsPage';
 import { HelpPage } from './pages/HelpPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -42,6 +43,7 @@ const ThemedShell: React.FC = () => {
           <MainLayout>
             <Routes>
               <Route path="/" element={<MathTutorPage />} />
+              <Route path="/practice" element={<PracticePage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/help" element={<HelpPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />

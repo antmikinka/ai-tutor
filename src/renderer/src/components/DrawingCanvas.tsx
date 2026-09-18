@@ -1,16 +1,23 @@
-import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from 'react';
-import { Box } from '@mui/material';
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { Box, Typography } from '@mui/material';
+import { alpha, useTheme } from '@mui/material/styles';
 import { fabric } from 'fabric';
+import type { WhiteboardGrid } from '../types/MathTypes';
 
-export type DrawingTool = 'pen' | 'eraser' | 'text' | 'rect' | 'ellipse' | 'line';
+export type DrawingTool = 'pen' | 'eraser' | 'select' | 'text' | 'rect' | 'ellipse' | 'line';
 
 interface DrawingCanvasProps {
   tool: DrawingTool;
   color: string;
   lineWidth: number;
+  /** Background guide; drawn with CSS so it never appears in exported images. */
+  grid?: WhiteboardGrid;
+  /** Shown centred on the canvas while it is empty. */
+  emptyHint?: React.ReactNode;
   /** Debounced notification that the drawing changed. Call `toDataURL()` if you need pixels. */
   onChange?: (info: { isEmpty: boolean }) => void;
   onHistoryChange?: (state: { canUndo: boolean; canRedo: boolean }) => void;
+  onSelectionChange?: (hasSelection: boolean) => void;
 }
 
 export interface DrawingCanvasRef {
@@ -19,6 +26,10 @@ export interface DrawingCanvasRef {
   undo: () => void;
   redo: () => void;
   isEmpty: () => boolean;
+  /** Remove the currently selected object(s). Returns true if something was removed. */
+  deleteSelection: () => boolean;
+  /** Place a text block on the canvas (used to bring a practice problem onto the whiteboard). */
+  addText: (text: string, options?: { fontSize?: number; color?: string; top?: number }) => void;
   toDataURL: (options?: { multiplier?: number }) => string;
   toJSON: () => string;
   loadJSON: (json: string) => Promise<void>;
@@ -27,6 +38,24 @@ export interface DrawingCanvasRef {
 const HISTORY_LIMIT = 50;
 const CHANGE_DEBOUNCE_MS = 300;
 const BACKGROUND = '#ffffff';
+const GRID_SIZE = 24;
+
+const gridBackground = (grid: WhiteboardGrid, lineColor: string): Record<string, string> => {
+  if (grid === 'dots') {
+    return {
+      backgroundImage: `radial-gradient(circle, ${lineColor} 1px, transparent 1.2px)`,
+      backgroundSize: `${GRID_SIZE}px ${GRID_SIZE}px`,
+      backgroundPosition: `${GRID_SIZE / 2}px ${GRID_SIZE / 2}px`,
+    };
+  }
+  if (grid === 'lines') {
+    return {
+      backgroundImage: `linear-gradient(${lineColor} 1px, transparent 1px), linear-gradient(90deg, ${lineColor} 1px, transparent 1px)`,
+      backgroundSize: `${GRID_SIZE}px ${GRID_SIZE}px`,
+    };
+  }
+  return {};
+};
 
 /**
  * Fabric.js drawing surface.
@@ -38,10 +67,12 @@ const BACKGROUND = '#ffffff';
  * ResizeObserver.
  */
 export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
-  ({ tool, color, lineWidth, onChange, onHistoryChange }, ref) => {
+  ({ tool, color, lineWidth, grid = 'none', emptyHint, onChange, onHistoryChange, onSelectionChange }, ref) => {
+    const theme = useTheme();
     const hostRef = useRef<HTMLDivElement>(null);
     const canvasElRef = useRef<HTMLCanvasElement>(null);
     const fabricRef = useRef<fabric.Canvas | null>(null);
+    const [isEmpty, setIsEmpty] = useState(true);
 
     const historyRef = useRef<string[]>([]);
     const historyIndexRef = useRef(-1);
@@ -50,8 +81,23 @@ export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
 
     const onChangeRef = useRef(onChange);
     const onHistoryChangeRef = useRef(onHistoryChange);
+    const onSelectionChangeRef = useRef(onSelectionChange);
+    const gridRef = useRef(grid);
     onChangeRef.current = onChange;
     onHistoryChangeRef.current = onHistoryChange;
+    onSelectionChangeRef.current = onSelectionChange;
+    gridRef.current = grid;
+
+    /** Fabric paints its own background; keep it transparent while a CSS grid shows through. */
+    const applyBackground = useCallback((canvas: fabric.Canvas) => {
+      canvas.backgroundColor = gridRef.current === 'none' ? BACKGROUND : '';
+    }, []);
+
+    const emitChange = useCallback((canvas: fabric.Canvas | null) => {
+      const empty = !canvas || canvas.getObjects().length === 0;
+      setIsEmpty(empty);
+      onChangeRef.current?.({ isEmpty: empty });
+    }, []);
 
     const emitHistory = useCallback(() => {
       onHistoryChangeRef.current?.({
@@ -79,10 +125,9 @@ export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
       changeTimerRef.current = setTimeout(() => {
         changeTimerRef.current = null;
         snapshot();
-        const canvas = fabricRef.current;
-        onChangeRef.current?.({ isEmpty: !canvas || canvas.getObjects().length === 0 });
+        emitChange(fabricRef.current);
       }, CHANGE_DEBOUNCE_MS);
-    }, [snapshot]);
+    }, [emitChange, snapshot]);
 
     const restore = useCallback(
       (json: string) =>
@@ -91,14 +136,14 @@ export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
           if (!canvas) return resolve();
           restoringRef.current = true;
           canvas.loadFromJSON(json, () => {
-            canvas.backgroundColor = BACKGROUND;
+            applyBackground(canvas);
             canvas.renderAll();
             restoringRef.current = false;
-            onChangeRef.current?.({ isEmpty: canvas.getObjects().length === 0 });
+            emitChange(canvas);
             resolve();
           });
         }),
-      [],
+      [applyBackground, emitChange],
     );
 
     // ---- lifecycle -------------------------------------------------------
@@ -111,18 +156,28 @@ export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
       const canvas = new fabric.Canvas(el, {
         width: host.clientWidth || 800,
         height: host.clientHeight || 600,
-        backgroundColor: BACKGROUND,
+        backgroundColor: gridRef.current === 'none' ? BACKGROUND : '',
         selection: false,
         preserveObjectStacking: true,
         enableRetinaScaling: true,
+        stopContextMenu: true,
+        fireRightClick: false,
       });
       fabricRef.current = canvas;
+
+      // Smoother freehand strokes: fabric's PencilBrush simplifies paths by this tolerance.
+      (canvas.freeDrawingBrush as fabric.PencilBrush & { decimate?: number }).decimate = 1.5;
 
       const onMutation = () => scheduleCommit();
       canvas.on('object:added', onMutation);
       canvas.on('object:modified', onMutation);
       canvas.on('object:removed', onMutation);
       canvas.on('text:changed', onMutation);
+
+      const onSelection = () => onSelectionChangeRef.current?.(Boolean(canvas.getActiveObject()));
+      canvas.on('selection:created', onSelection);
+      canvas.on('selection:updated', onSelection);
+      canvas.on('selection:cleared', onSelection);
 
       snapshot();
 
@@ -149,12 +204,14 @@ export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
       const canvas = fabricRef.current;
       if (!canvas) return;
 
+      const interactive = tool === 'select' || tool === 'text';
       canvas.isDrawingMode = tool === 'pen';
-      canvas.selection = tool === 'text';
-      canvas.defaultCursor = tool === 'eraser' ? 'cell' : tool === 'text' ? 'text' : 'crosshair';
+      canvas.selection = tool === 'select'; // rubber-band multi-select only in select mode
+      canvas.defaultCursor = tool === 'eraser' ? 'cell' : tool === 'text' ? 'text' : tool === 'select' ? 'default' : 'crosshair';
+      canvas.hoverCursor = tool === 'eraser' ? 'cell' : tool === 'select' || tool === 'text' ? 'move' : canvas.defaultCursor;
       canvas.forEachObject((obj) => {
-        obj.selectable = tool === 'text';
-        obj.evented = tool === 'text' || tool === 'eraser';
+        obj.selectable = interactive;
+        obj.evented = interactive || tool === 'eraser';
       });
       canvas.discardActiveObject();
       canvas.requestRenderAll();
@@ -165,6 +222,7 @@ export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
         brush.width = lineWidth;
         return;
       }
+      if (tool === 'select') return;
 
       const disposers: Array<() => void> = [];
       const on = <T extends Event = Event>(event: string, handler: (e: fabric.IEvent<T>) => void) => {
@@ -276,11 +334,44 @@ export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
           if (!canvas) return;
           restoringRef.current = true;
           canvas.clear();
-          canvas.backgroundColor = BACKGROUND;
+          applyBackground(canvas);
           canvas.renderAll();
           restoringRef.current = false;
           snapshot();
-          onChangeRef.current?.({ isEmpty: true });
+          emitChange(canvas);
+        },
+        deleteSelection: () => {
+          const canvas = fabricRef.current;
+          if (!canvas) return false;
+          const active = canvas.getActiveObjects();
+          if (active.length === 0) return false;
+          const editing = active.some((o) => (o as fabric.IText).isEditing);
+          if (editing) return false; // Backspace inside a text box edits text, not the object
+          restoringRef.current = true;
+          active.forEach((o) => canvas.remove(o));
+          canvas.discardActiveObject();
+          restoringRef.current = false;
+          canvas.requestRenderAll();
+          scheduleCommit();
+          return true;
+        },
+        addText: (text, options) => {
+          const canvas = fabricRef.current;
+          if (!canvas || !text.trim()) return;
+          const width = Math.max(240, canvas.getWidth() - 48);
+          const textbox = new fabric.Textbox(text, {
+            left: 24,
+            top: options?.top ?? 24,
+            width,
+            fontFamily: 'Segoe UI, Roboto, sans-serif',
+            fontSize: options?.fontSize ?? 18,
+            fill: options?.color ?? '#212121',
+            lineHeight: 1.3,
+            selectable: true,
+            evented: true,
+          });
+          canvas.add(textbox);
+          canvas.requestRenderAll();
         },
         undo: () => {
           if (historyIndexRef.current <= 0) return;
@@ -294,19 +385,68 @@ export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
           emitHistory();
           void restore(historyRef.current[historyIndexRef.current]);
         },
-        toDataURL: (options) => fabricRef.current?.toDataURL({ format: 'png', multiplier: options?.multiplier ?? 1 }) || '',
+        toDataURL: (options) => {
+          const canvas = fabricRef.current;
+          if (!canvas) return '';
+          // Exports are always on white, regardless of the on-screen grid.
+          const previous = canvas.backgroundColor;
+          canvas.backgroundColor = BACKGROUND;
+          const url = canvas.toDataURL({ format: 'png', multiplier: options?.multiplier ?? 1 });
+          canvas.backgroundColor = previous;
+          canvas.requestRenderAll();
+          return url;
+        },
         toJSON: () => (fabricRef.current ? JSON.stringify(fabricRef.current.toJSON()) : ''),
         loadJSON: async (json) => {
           await restore(json);
           snapshot();
         },
       }),
-      [emitHistory, restore, snapshot],
+      [applyBackground, emitChange, emitHistory, restore, scheduleCommit, snapshot],
     );
 
+    useEffect(() => {
+      const canvas = fabricRef.current;
+      if (!canvas) return;
+      applyBackground(canvas);
+      canvas.requestRenderAll();
+    }, [applyBackground, grid]);
+
+    const gridColor = alpha(theme.palette.text.primary, 0.12);
+
     return (
-      <Box ref={hostRef} sx={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden' }}>
+      <Box
+        ref={hostRef}
+        sx={{
+          width: '100%',
+          height: '100%',
+          position: 'relative',
+          overflow: 'hidden',
+          backgroundColor: BACKGROUND,
+          touchAction: 'none', // stylus / finger drawing must not scroll the page
+          userSelect: 'none',
+          ...gridBackground(grid, gridColor),
+        }}
+      >
         <canvas ref={canvasElRef} />
+        {isEmpty && emptyHint && (
+          <Box
+            sx={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              pointerEvents: 'none',
+              p: 4,
+              textAlign: 'center',
+            }}
+          >
+            <Typography variant="body2" sx={{ color: alpha('#000', 0.38), maxWidth: 420 }}>
+              {emptyHint}
+            </Typography>
+          </Box>
+        )}
       </Box>
     );
   },

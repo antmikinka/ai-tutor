@@ -22,11 +22,12 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { CheckCircle, Delete, Download, ErrorOutline, Memory, Mic, Monitor, Refresh, Save, Speed, VolumeUp } from '@mui/icons-material';
+import { CheckCircle, Delete, Download, ErrorOutline, Memory, Mic, Monitor, Refresh, Save, School, Speed, VolumeUp } from '@mui/icons-material';
 import { styled } from '@mui/material/styles';
+import { useNavigate } from 'react-router-dom';
 import { useSettingsContext } from '../contexts/SettingsContext';
 import { ApiError, apiFetch } from '../lib/backend';
-import type { BackendModel, BackendModelStatus, SystemResources, UserSettings } from '../types/MathTypes';
+import type { BackendModel, BackendModelStatus, KnowledgeStatus, PracticeStatus, SystemResources, UserSettings } from '../types/MathTypes';
 
 const Container = styled(Box)(({ theme }) => ({
   padding: theme.spacing(3),
@@ -61,8 +62,10 @@ const mb = (value: number) => (value >= 1024 ? `${(value / 1024).toFixed(1)} GB`
 const POLL_MS = 4000;
 
 export const SettingsPage: React.FC = () => {
+  const navigate = useNavigate();
   const { settings, updateSettings, resetSettings, isLoading, error } = useSettingsContext();
   const [draft, setDraft] = useState<UserSettings>(settings);
+  const [learning, setLearning] = useState<{ knowledge: KnowledgeStatus; practice: PracticeStatus } | null>(null);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -93,6 +96,12 @@ export const SettingsPage: React.FC = () => {
       setBackendError(null);
     } catch (err) {
       setBackendError(err instanceof Error ? err.message : 'Backend unreachable');
+    }
+    try {
+      const [knowledge, practice] = await Promise.all([apiFetch<KnowledgeStatus>('/api/knowledge/status'), apiFetch<PracticeStatus>('/api/practice/status')]);
+      setLearning({ knowledge, practice });
+    } catch {
+      setLearning(null);
     }
   }, []);
 
@@ -255,6 +264,82 @@ export const SettingsPage: React.FC = () => {
             </Grid>
             <Grid item xs={12} md={4}>
               <FormControlLabel control={<Switch checked={draft.displaySettings.showModelInfo} onChange={(e) => setField('displaySettings', { showModelInfo: e.target.checked })} />} label="Show engine and timing" />
+            </Grid>
+          </Grid>
+        </CardContent>
+      </Section>
+
+      {/* ---- Whiteboard & practice ---- */}
+      <Section>
+        <CardHeader avatar={<School />} title="Whiteboard & practice" subheader="Learn-by-doing defaults. The quick-settings button in the top bar changes the same options mid-session." />
+        <CardContent>
+          <Grid container spacing={3}>
+            <Grid item xs={12} md={4}>
+              <FormControl fullWidth>
+                <InputLabel>Whiteboard background</InputLabel>
+                <Select value={draft.whiteboardSettings.grid} label="Whiteboard background" onChange={(e) => setField('whiteboardSettings', { grid: e.target.value as UserSettings['whiteboardSettings']['grid'] })}>
+                  <MenuItem value="none">Plain</MenuItem>
+                  <MenuItem value="dots">Dot grid</MenuItem>
+                  <MenuItem value="lines">Square grid</MenuItem>
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12} md={4}>
+              <FormControl fullWidth>
+                <InputLabel>Default difficulty</InputLabel>
+                <Select value={draft.practiceSettings.difficulty} label="Default difficulty" onChange={(e) => setField('practiceSettings', { difficulty: e.target.value as UserSettings['practiceSettings']['difficulty'] })}>
+                  <MenuItem value="easy">Easy</MenuItem>
+                  <MenuItem value="medium">Medium</MenuItem>
+                  <MenuItem value="hard">Hard</MenuItem>
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12} md={4}>
+              <FormControlLabel control={<Switch checked={draft.whiteboardSettings.showShortcutHints} onChange={(e) => setField('whiteboardSettings', { showShortcutHints: e.target.checked })} />} label="Show keyboard shortcut hints" />
+            </Grid>
+            <Grid item xs={12} md={6}>
+              <FormControlLabel
+                control={<Switch checked={draft.practiceSettings.showEquationImmediately} onChange={(e) => setField('practiceSettings', { showEquationImmediately: e.target.checked })} />}
+                label="Show the modelling equation as soon as a problem appears"
+              />
+            </Grid>
+            <Grid item xs={12} md={6}>
+              <FormControlLabel
+                control={<Switch checked={draft.practiceSettings.preferLanguageModel} onChange={(e) => setField('practiceSettings', { preferLanguageModel: e.target.checked })} />}
+                label="Use the language model to write problems when one is available"
+              />
+            </Grid>
+            <Grid item xs={12}>
+              <Stack direction="row" spacing={1} flexWrap="wrap" rowGap={1} alignItems="center">
+                <Typography variant="body2" color="text.secondary">
+                  Backend:
+                </Typography>
+                {learning ? (
+                  <>
+                    <Chip
+                      size="small"
+                      color={learning.knowledge.available ? 'success' : 'default'}
+                      label={
+                        learning.knowledge.available
+                          ? `Course material: ${learning.knowledge.documents} docs, ${learning.knowledge.chunks} passages (${learning.knowledge.backend === 'chroma' ? 'Chroma' : 'local'}, ${learning.knowledge.embedding === 'minilm' ? 'MiniLM' : 'hashing'})`
+                          : `Course material unavailable${learning.knowledge.error ? `: ${learning.knowledge.error}` : ''}`
+                      }
+                    />
+                    <Chip size="small" color={learning.practice.llm_available ? 'success' : 'default'} label={learning.practice.llm_available ? `Problem writer: ${learning.practice.llm}` : 'Problem writer: verified templates'} />
+                  </>
+                ) : (
+                  <Chip size="small" label="Backend unreachable" />
+                )}
+                <Button size="small" onClick={() => navigate('/practice')} sx={{ textTransform: 'none' }}>
+                  Manage course material
+                </Button>
+              </Stack>
+              {learning && !learning.practice.llm_available && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                  To have word problems written by a language model, either load the reasoning model below or set <code>LLM_API_BASE_URL</code> (and optionally <code>LLM_API_KEY</code>, <code>LLM_API_MODEL</code>) for the backend to any OpenAI-compatible endpoint — OpenAI, Ollama, LM Studio, vLLM. Every generated
+                  problem is still checked by the symbolic engine before you see it.
+                </Typography>
+              )}
             </Grid>
           </Grid>
         </CardContent>

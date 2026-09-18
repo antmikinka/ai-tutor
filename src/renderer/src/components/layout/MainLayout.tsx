@@ -21,6 +21,7 @@ import {
 import {
   Menu as MenuIcon,
   Calculate,
+  School,
   Settings,
   Help,
   Fullscreen,
@@ -30,6 +31,7 @@ import {
 } from '@mui/icons-material';
 import { styled } from '@mui/material/styles';
 import ConnectionStatus from '../ConnectionStatus';
+import { QuickSettings } from '../QuickSettings';
 import { useSettingsContext } from '../../contexts/SettingsContext';
 
 const drawerWidth = 240;
@@ -48,7 +50,8 @@ const Main = styled('main', { shouldForwardProp: (prop) => prop !== 'open' })<{ 
 }));
 
 const menuItems = [
-  { text: 'Math Tutor', icon: <Calculate />, path: '/' },
+  { text: 'Whiteboard', icon: <Calculate />, path: '/' },
+  { text: 'Practice', icon: <School />, path: '/practice' },
   { text: 'Settings', icon: <Settings />, path: '/settings' },
   { text: 'Help', icon: <Help />, path: '/help' },
 ];
@@ -138,6 +141,8 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           <Box sx={{ mr: 2 }}>
             <ConnectionStatus compact={isMobile} />
           </Box>
+
+          <QuickSettings />
 
           <Tooltip title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
             <IconButton color="inherit" onClick={toggleFullscreen}>

@@ -1,37 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Box,
-  Divider,
-  IconButton,
-  Menu,
-  MenuItem,
-  Paper,
-  Slider,
-  Stack,
-  ToggleButton,
-  ToggleButtonGroup,
-  Tooltip,
-  Typography,
-} from '@mui/material';
-import {
-  AutoFixHigh,
-  Brush,
-  CheckCircleOutline,
-  CropSquare,
-  Delete,
-  FactCheck,
-  Image as ImageIcon,
-  Mic,
-  PanoramaFishEye,
-  Redo,
-  Remove,
-  Save,
-  Stop,
-  TextFields,
-  Undo,
-} from '@mui/icons-material';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { Box, Button, IconButton, Menu, MenuItem, Paper, Stack, ToggleButton, Tooltip, Typography } from '@mui/material';
+import { CheckCircleOutline, FactCheck, Image as ImageIcon, Mic, Save, School, Stop } from '@mui/icons-material';
 import { styled } from '@mui/material/styles';
 import { DrawingCanvas, DrawingCanvasRef, DrawingTool } from '../components/DrawingCanvas';
+import { TOOL_HOTKEYS, WhiteboardToolbar } from '../components/WhiteboardToolbar';
 import { ChatInterface } from '../components/ChatInterface';
 import { MathInput } from '../components/MathInput';
 import { useWebSocketContext } from '../contexts/WebSocketContext';
@@ -67,13 +40,11 @@ const ChatPane = styled(Paper)(({ theme }) => ({
   [theme.breakpoints.down('md')]: { width: '100%', flex: 1 },
 }));
 
-const ToolRow = styled(Stack)(({ theme }) => ({
-  flexDirection: 'row',
-  alignItems: 'center',
-  flexWrap: 'wrap',
-  gap: theme.spacing(1),
-  marginBottom: theme.spacing(1.5),
-}));
+/** Router state accepted by this page (sent from the Practice page). */
+export interface WhiteboardHandoff {
+  whiteboardText?: string;
+  prefillInput?: string;
+}
 
 const newId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 const now = () => new Date().toISOString();
@@ -82,6 +53,8 @@ const isTypingTarget = (target: EventTarget | null) => {
   const el = target as HTMLElement | null;
   return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
 };
+
+const HOTKEY_TO_TOOL = Object.fromEntries(Object.entries(TOOL_HOTKEYS).map(([tool, key]) => [key.toLowerCase(), tool])) as Record<string, DrawingTool>;
 
 const describeError = (error: unknown): { text: string; code?: string } => {
   if (error instanceof WebSocketRequestError) return { text: error.message, code: error.code };
@@ -92,13 +65,19 @@ const describeError = (error: unknown): { text: string; code?: string } => {
 
 export const MathTutorPage: React.FC = () => {
   const { connectionStatus, capabilities, request, subscribe } = useWebSocketContext();
-  const { settings } = useSettingsContext();
+  const { settings, updateWhiteboardSettings } = useSettingsContext();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { whiteboardSettings } = settings;
 
   const [tool, setTool] = useState<DrawingTool>('pen');
-  const [color, setColor] = useState('#1a237e');
-  const [lineWidth, setLineWidth] = useState(3);
+  const color = whiteboardSettings.penColor;
+  const lineWidth = whiteboardSettings.penWidth;
+  const setColor = (penColor: string) => void updateWhiteboardSettings({ penColor });
+  const setLineWidth = (penWidth: number) => void updateWhiteboardSettings({ penWidth });
   const [history, setHistory] = useState({ canUndo: false, canRedo: false });
   const [canvasEmpty, setCanvasEmpty] = useState(true);
+  const [hasSelection, setHasSelection] = useState(false);
 
   const [input, setInput] = useState('');
   const [verifyMode, setVerifyMode] = useState(false);
@@ -389,22 +368,41 @@ export const MathTutorPage: React.FC = () => {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
-      if (!mod) return;
       const key = e.key.toLowerCase();
-      if (key === 's') {
-        e.preventDefault();
-        void exportAs('txt');
-      } else if (key === 'm') {
-        e.preventDefault();
-        toggleRecording();
-      } else if (!isTypingTarget(e.target)) {
-        if (key === 'z' && !e.shiftKey) {
+      const typing = isTypingTarget(e.target);
+      if (mod) {
+        if (key === 's') {
           e.preventDefault();
-          canvasRef.current?.undo();
-        } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+          void exportAs('txt');
+        } else if (key === 'm') {
           e.preventDefault();
-          canvasRef.current?.redo();
+          toggleRecording();
+        } else if (!typing) {
+          if (key === 'z' && !e.shiftKey) {
+            e.preventDefault();
+            canvasRef.current?.undo();
+          } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+            e.preventDefault();
+            canvasRef.current?.redo();
+          }
         }
+        return;
+      }
+      if (typing || e.altKey) return;
+      // Single-key tool switching and deletion, only when focus is not in a text field
+      // (fabric's IText editor uses a hidden textarea, so typing on the canvas is safe too).
+      if ((e.key === 'Delete' || e.key === 'Backspace') && canvasRef.current?.deleteSelection()) {
+        e.preventDefault();
+        return;
+      }
+      if (e.key === 'Escape') {
+        canvasRef.current?.getCanvas()?.discardActiveObject().requestRenderAll();
+        return;
+      }
+      const nextTool = HOTKEY_TO_TOOL[key];
+      if (nextTool) {
+        e.preventDefault();
+        setTool(nextTool);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -413,6 +411,21 @@ export const MathTutorPage: React.FC = () => {
   });
 
   useEffect(() => () => recorderRef.current?.stop(), []);
+
+  // ---- hand-off from the Practice page ---------------------------------
+
+  useEffect(() => {
+    const state = location.state as WhiteboardHandoff | null;
+    if (!state || (!state.whiteboardText && !state.prefillInput)) return;
+    if (state.whiteboardText) {
+      // The canvas mounts in the same commit; defer one frame so it has its size.
+      const text = state.whiteboardText;
+      requestAnimationFrame(() => canvasRef.current?.addText(text));
+      setTool('pen');
+    }
+    if (state.prefillInput) setInput(state.prefillInput);
+    navigate(location.pathname, { replace: true, state: null });
+  }, [location.pathname, location.state, navigate]);
 
   const speechAvailable = Boolean(capabilities?.speech);
   const recognitionAvailable = Boolean(capabilities?.drawing_recognition);
@@ -423,61 +436,36 @@ export const MathTutorPage: React.FC = () => {
       <CanvasPane elevation={1}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
           <Typography variant="h6">Whiteboard</Typography>
-          <Typography variant="caption" color="text.secondary">
-            Ctrl+Z / Ctrl+Y undo & redo · Ctrl+S export · Ctrl+M microphone
-          </Typography>
+          <Stack direction="row" spacing={1} alignItems="center">
+            {whiteboardSettings.showShortcutHints && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: { xs: 'none', lg: 'block' } }}>
+                P/E/V/T/L/R/O tools · Del delete · Ctrl+Z/Y undo/redo · Ctrl+S export · Ctrl+M mic
+              </Typography>
+            )}
+            <Button size="small" startIcon={<School />} onClick={() => navigate('/practice')} sx={{ textTransform: 'none' }}>
+              Practice
+            </Button>
+          </Stack>
         </Stack>
 
-        <ToolRow>
-          <ToggleButtonGroup size="small" exclusive value={tool} onChange={(_, value: DrawingTool | null) => value && setTool(value)}>
-            <ToggleButton value="pen" aria-label="Pen">
-              <Tooltip title="Pen"><Brush fontSize="small" /></Tooltip>
-            </ToggleButton>
-            <ToggleButton value="eraser" aria-label="Eraser">
-              <Tooltip title="Eraser (removes strokes you touch)"><AutoFixHigh fontSize="small" /></Tooltip>
-            </ToggleButton>
-            <ToggleButton value="text" aria-label="Text">
-              <Tooltip title="Text (click to place, drag to move)"><TextFields fontSize="small" /></Tooltip>
-            </ToggleButton>
-            <ToggleButton value="line" aria-label="Line">
-              <Tooltip title="Line"><Remove fontSize="small" /></Tooltip>
-            </ToggleButton>
-            <ToggleButton value="rect" aria-label="Rectangle">
-              <Tooltip title="Rectangle"><CropSquare fontSize="small" /></Tooltip>
-            </ToggleButton>
-            <ToggleButton value="ellipse" aria-label="Ellipse">
-              <Tooltip title="Ellipse"><PanoramaFishEye fontSize="small" /></Tooltip>
-            </ToggleButton>
-          </ToggleButtonGroup>
-
-          <Tooltip title="Stroke colour">
-            <Box
-              component="input"
-              type="color"
-              value={color}
-              aria-label="Stroke colour"
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setColor(e.target.value)}
-              sx={{ width: 32, height: 32, p: 0, border: 'none', bgcolor: 'transparent', cursor: 'pointer' }}
-            />
-          </Tooltip>
-          <Box sx={{ width: 100, px: 1 }}>
-            <Slider size="small" min={1} max={12} value={lineWidth} onChange={(_, v) => setLineWidth(v as number)} aria-label="Stroke width" />
-          </Box>
-
-          <Divider orientation="vertical" flexItem />
-
-          <Tooltip title="Undo (Ctrl+Z)">
-            <span><IconButton size="small" onClick={() => canvasRef.current?.undo()} disabled={!history.canUndo}><Undo fontSize="small" /></IconButton></span>
-          </Tooltip>
-          <Tooltip title="Redo (Ctrl+Y)">
-            <span><IconButton size="small" onClick={() => canvasRef.current?.redo()} disabled={!history.canRedo}><Redo fontSize="small" /></IconButton></span>
-          </Tooltip>
-          <Tooltip title="Clear canvas">
-            <span><IconButton size="small" onClick={() => canvasRef.current?.clear()} disabled={canvasEmpty}><Delete fontSize="small" /></IconButton></span>
-          </Tooltip>
-
-          <Divider orientation="vertical" flexItem />
-
+        <WhiteboardToolbar
+          tool={tool}
+          onToolChange={setTool}
+          color={color}
+          onColorChange={setColor}
+          lineWidth={lineWidth}
+          onLineWidthChange={setLineWidth}
+          grid={whiteboardSettings.grid}
+          onGridChange={(grid) => void updateWhiteboardSettings({ grid })}
+          canUndo={history.canUndo}
+          canRedo={history.canRedo}
+          canvasEmpty={canvasEmpty}
+          hasSelection={hasSelection}
+          onUndo={() => canvasRef.current?.undo()}
+          onRedo={() => canvasRef.current?.redo()}
+          onDeleteSelection={() => canvasRef.current?.deleteSelection()}
+          onClear={() => canvasRef.current?.clear()}
+        >
           <Tooltip title={recognitionAvailable ? 'Recognize the drawing' : 'Handwriting recognition needs the Qwen3-Omni model (see Settings). Sends the canvas to the backend for basic analysis.'}>
             <span>
               <IconButton
@@ -518,7 +506,7 @@ export const MathTutorPage: React.FC = () => {
             <MenuItem onClick={() => exportAs('png')} disabled={canvasEmpty}>Canvas as PNG</MenuItem>
             <MenuItem onClick={() => exportAs('pdf')} disabled={messages.length === 0 && canvasEmpty}>Canvas + transcript as PDF</MenuItem>
           </Menu>
-        </ToolRow>
+        </WhiteboardToolbar>
 
         <Box sx={{ flex: 1, minHeight: 0, border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'hidden' }}>
           <DrawingCanvas
@@ -526,8 +514,11 @@ export const MathTutorPage: React.FC = () => {
             tool={tool}
             color={color}
             lineWidth={lineWidth}
+            grid={whiteboardSettings.grid}
+            emptyHint="Work the problem out here — draw, add text or shapes. Type the expression below for an exact answer, or open Practice for a word problem to try."
             onChange={({ isEmpty }) => setCanvasEmpty(isEmpty)}
             onHistoryChange={setHistory}
+            onSelectionChange={setHasSelection}
           />
         </Box>
       </CanvasPane>

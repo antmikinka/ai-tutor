@@ -48,19 +48,42 @@ export class ApiError extends Error {
   }
 }
 
+const describeDetail = (detail: unknown): unknown => {
+  // FastAPI validation errors arrive as a list of {loc, msg}; flatten to a sentence.
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d) => (d && typeof d === 'object' && 'msg' in d ? `${(d as { loc?: unknown[] }).loc?.slice(-1)[0] ?? ''}: ${(d as { msg: string }).msg}` : String(d)))
+      .join('; ');
+  }
+  return detail;
+};
+
 export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const base = await resolveBackendUrl();
+  // Let the browser set the multipart boundary for FormData bodies.
+  const headers: Record<string, string> =
+    init?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
   const response = await fetch(`${base}${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+    headers: { ...headers, ...((init?.headers as Record<string, string>) || {}) },
   });
   const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
+  let body: any = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = text;
+  }
   if (!response.ok) {
-    throw new ApiError(response.status, body?.detail ?? body);
+    throw new ApiError(response.status, describeDetail(body?.detail ?? body) ?? `HTTP ${response.status}`);
   }
   return body as T;
 };
+
+export const apiJson = <T>(path: string, method: 'POST' | 'PUT' | 'DELETE', payload?: unknown): Promise<T> =>
+  apiFetch<T>(path, { method, body: payload === undefined ? undefined : JSON.stringify(payload) });
+
+export const apiUpload = <T>(path: string, form: FormData): Promise<T> => apiFetch<T>(path, { method: 'POST', body: form });
 
 export const newClientId = (): string => {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
