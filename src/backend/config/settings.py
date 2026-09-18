@@ -42,6 +42,9 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
         "app://.",
         "file://",
+        # Chromium sends ``Origin: null`` for pages loaded from file:// (the
+        # packaged Electron renderer).
+        "null",
     ]
 
     # Database Settings
