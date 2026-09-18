@@ -1,61 +1,27 @@
-export interface MathSolution {
+import type { BackendSolution, BackendVerification, DrawingAnalysis } from './protocol';
+
+// ---- chat --------------------------------------------------------------
+
+interface ChatBase {
   id: string;
-  problem: string;
-  solution: string;
-  steps?: string[];
-  confidence: number;
   timestamp: string;
-  metadata?: {
-    toolUsed?: string;
-    difficulty?: 'easy' | 'medium' | 'hard';
-    category?: string;
-    tags?: string[];
-    modelUsed?: string;
-    thinkingProcess?: string;
-  };
 }
 
-export interface DrawingData {
-  type: 'drawing' | 'text' | 'shape';
-  data: string;
-  timestamp: string;
-  metadata?: {
-    tool: string;
-    color: string;
-    lineWidth: number;
-  };
-}
+export type UserInputSource = 'text' | 'voice' | 'drawing' | 'image';
 
-export interface AudioData {
-  type: 'speech_input' | 'speech_output';
-  data: string;
-  timestamp: string;
-  metadata?: {
-    duration?: number;
-    language?: string;
-    confidence?: number;
-    modelUsed?: string;
-    educationalMode?: boolean;
-    noiseReduction?: boolean;
-  };
-}
+export type ChatMessage =
+  | (ChatBase & { kind: 'user'; text: string; source: UserInputSource })
+  | (ChatBase & { kind: 'solution'; solution: BackendSolution })
+  | (ChatBase & { kind: 'verification'; problem: string; proposed: string; verdict: BackendVerification })
+  | (ChatBase & { kind: 'drawing'; analysis: DrawingAnalysis })
+  | (ChatBase & { kind: 'info'; text: string })
+  | (ChatBase & { kind: 'error'; text: string; code?: string });
 
-export interface ModelInfo {
-  id: string;
-  name: string;
-  description: string;
-  type: 'reasoning' | 'tts' | 'stt';
-  size: string;
-  memoryRequired: number;
-  gpuRequired: boolean;
-  status: 'not_downloaded' | 'downloading' | 'loaded' | 'error';
-  downloadProgress?: number;
-  supportedLanguages: string[];
-  specialFeatures: string[];
-  lastUsed?: string;
-  isOptimized?: boolean;
-  optimizationType?: string;
-}
+/** Distributive Omit so each union member keeps its own fields. */
+type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
+export type ChatMessageInput = DistributiveOmit<ChatMessage, 'id' | 'timestamp'>;
+
+// ---- settings ----------------------------------------------------------
 
 export interface ModelConfig {
   reasoningModel: string;
@@ -115,40 +81,32 @@ export interface UserSettings {
   appVersion: string;
 }
 
-export interface SystemInfo {
-  platform: string;
-  arch: string;
-  version: string;
-  electronVersion: string;
-  screens: Array<{
-    id: number;
-    width: number;
-    height: number;
-    scaleFactor: number;
-  }>;
-  memory: {
-    total: number;
-    free: number;
-    used: number;
-  };
-  cpu: {
-    model: string;
-    cores: number;
-    architecture: string;
-  };
-  gpu?: Array<{
-    id: number;
-    name: string;
-    memory: number;
-    isAvailable: boolean;
-  }>;
+// ---- backend model management (GET /api/models) -------------------------
+
+export type BackendModelStatus = 'loaded' | 'loading' | 'error' | 'unavailable' | 'available' | 'not_downloaded';
+
+export interface BackendModel {
+  name: string;
+  model_name: string;
+  type: string;
+  model_id: string;
+  description: string;
+  status: BackendModelStatus;
+  downloaded: boolean;
+  path: string;
+  device: string | null;
+  memory_usage: number;
+  loading_progress: number;
+  loaded_at: string | null;
+  error: string | null;
+  requirements: { file_size_gb: number; memory_required_gb: number; gpu_required: boolean };
 }
 
-export interface ModelPerformanceMetrics {
-  modelId: string;
-  loadTime: number;
-  inferenceTime: number;
-  memoryUsage: number;
-  accuracy: number;
+export interface SystemResources {
+  cpu: { percent_used: number | null; count: number | null };
+  memory: { total_gb?: number; available_gb?: number; used_gb?: number; percent_used?: number };
+  disk: { total_gb?: number; free_gb?: number; used_gb?: number; percent_used?: number };
+  gpu: Array<{ device_id: number; name: string; memory_total_gb: number; memory_allocated_gb: number }>;
+  ml_stack: Record<string, unknown>;
   timestamp: string;
 }

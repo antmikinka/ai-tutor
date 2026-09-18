@@ -1,13 +1,15 @@
-import { useState, useEffect, useCallback } from 'react';
-import { UserSettings, ModelInfo, ModelPerformanceMetrics } from '../types/MathTypes';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { UserSettings } from '../types/MathTypes';
 
-const defaultSettings: UserSettings = {
+const STORAGE_KEY = 'mathTutorSettings';
+
+export const defaultSettings: UserSettings = {
   audioSettings: {
     inputDevice: 'default',
     outputDevice: 'default',
     volume: 0.8,
-    enableSpeechRecognition: true,
-    enableTextToSpeech: true,
+    enableSpeechRecognition: false,
+    enableTextToSpeech: false,
     ttsVoice: 'default',
     ttsLanguage: 'en',
     ttsSpeed: 1.0,
@@ -33,7 +35,7 @@ const defaultSettings: UserSettings = {
     showStepByStep: true,
     showConfidence: true,
     showModelInfo: true,
-    showPerformanceMetrics: true,
+    showPerformanceMetrics: false,
   },
   modelConfig: {
     reasoningModel: 'Qwen3-Omni-30B-A3B-Thinking',
@@ -45,78 +47,89 @@ const defaultSettings: UserSettings = {
       quantization: false,
       pruning: false,
       useGPU: true,
-      maxMemoryUsage: 8192, // 8GB
+      maxMemoryUsage: 8192,
     },
   },
-  appVersion: '2.0.0',
+  appVersion: process.env.REACT_APP_VERSION || '1.0.0',
 };
 
+const mergeSettings = (base: UserSettings, patch: Partial<UserSettings> | null | undefined): UserSettings => ({
+  ...base,
+  ...patch,
+  audioSettings: { ...base.audioSettings, ...(patch?.audioSettings || {}) },
+  modelSettings: { ...base.modelSettings, ...(patch?.modelSettings || {}) },
+  displaySettings: { ...base.displaySettings, ...(patch?.displaySettings || {}) },
+  modelConfig: {
+    ...base.modelConfig,
+    ...(patch?.modelConfig || {}),
+    optimizationSettings: { ...base.modelConfig.optimizationSettings, ...(patch?.modelConfig?.optimizationSettings || {}) },
+  },
+});
+
+/**
+ * User preferences, persisted through Electron's store when available and
+ * localStorage otherwise. Instantiate once (in SettingsProvider).
+ */
 export const useAppSettings = () => {
   const [settings, setSettings] = useState<UserSettings>(defaultSettings);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [modelPerformance, setModelPerformance] = useState<ModelPerformanceMetrics[]>([]);
-  const [isManagingModels, setIsManagingModels] = useState(false);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  const persist = useCallback(async (next: UserSettings) => {
+    if (window.electronAPI) {
+      await window.electronAPI.updateSettings({ userSettings: next });
+    } else {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    }
+  }, []);
 
   const loadSettings = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
     try {
-      setIsLoading(true);
-      setError(null);
-
-      // Try to get settings from Electron main process
+      let stored: Partial<UserSettings> | null = null;
       if (window.electronAPI) {
         const electronSettings = await window.electronAPI.getSettings();
-        setSettings({ ...defaultSettings, ...electronSettings });
+        stored = (electronSettings?.userSettings as Partial<UserSettings>) || null;
       } else {
-        // Fallback to localStorage for web development
-        const savedSettings = localStorage.getItem('mathTutorSettings');
-        if (savedSettings) {
-          const parsed = JSON.parse(savedSettings);
-          setSettings({ ...defaultSettings, ...parsed });
-        }
+        const raw = localStorage.getItem(STORAGE_KEY);
+        stored = raw ? JSON.parse(raw) : null;
       }
+      setSettings(mergeSettings(defaultSettings, stored));
     } catch (err) {
       console.error('Failed to load settings:', err);
-      setError('Failed to load settings');
+      setError('Failed to load settings; using defaults.');
     } finally {
       setIsLoading(false);
     }
   }, []);
 
-  const updateSettings = useCallback(async (newSettings: Partial<UserSettings>) => {
-    try {
-      const updatedSettings = { ...settings, ...newSettings };
-
-      // Update state
-      setSettings(updatedSettings);
-
-      // Save to Electron main process
-      if (window.electronAPI) {
-        await window.electronAPI.updateSettings(updatedSettings);
-      } else {
-        // Fallback to localStorage
-        localStorage.setItem('mathTutorSettings', JSON.stringify(updatedSettings));
+  const updateSettings = useCallback(
+    async (patch: Partial<UserSettings>) => {
+      const next = mergeSettings(settingsRef.current, patch);
+      setSettings(next);
+      try {
+        await persist(next);
+        return true;
+      } catch (err) {
+        console.error('Failed to save settings:', err);
+        setError('Failed to save settings');
+        return false;
       }
-
-      return true;
-    } catch (err) {
-      console.error('Failed to update settings:', err);
-      setError('Failed to update settings');
-      return false;
-    }
-  }, [settings]);
+    },
+    [persist],
+  );
 
   const resetSettings = useCallback(async () => {
+    setSettings(defaultSettings);
     try {
-      setSettings(defaultSettings);
-
       if (window.electronAPI) {
-        await window.electronAPI.updateSettings(defaultSettings);
+        await window.electronAPI.updateSettings({ userSettings: defaultSettings });
       } else {
-        localStorage.removeItem('mathTutorSettings');
+        localStorage.removeItem(STORAGE_KEY);
       }
-
       return true;
     } catch (err) {
       console.error('Failed to reset settings:', err);
@@ -125,210 +138,39 @@ export const useAppSettings = () => {
     }
   }, []);
 
-  const updateAudioSettings = useCallback((audioSettings: Partial<UserSettings['audioSettings']>) => {
-    return updateSettings({ audioSettings: { ...settings.audioSettings, ...audioSettings } });
-  }, [settings, updateSettings]);
+  const updateAudioSettings = useCallback(
+    (audioSettings: Partial<UserSettings['audioSettings']>) => updateSettings({ audioSettings: audioSettings as UserSettings['audioSettings'] }),
+    [updateSettings],
+  );
+  const updateModelSettings = useCallback(
+    (modelSettings: Partial<UserSettings['modelSettings']>) => updateSettings({ modelSettings: modelSettings as UserSettings['modelSettings'] }),
+    [updateSettings],
+  );
+  const updateDisplaySettings = useCallback(
+    (displaySettings: Partial<UserSettings['displaySettings']>) => updateSettings({ displaySettings: displaySettings as UserSettings['displaySettings'] }),
+    [updateSettings],
+  );
+  const updateModelConfig = useCallback(
+    (modelConfig: Partial<UserSettings['modelConfig']>) => updateSettings({ modelConfig: modelConfig as UserSettings['modelConfig'] }),
+    [updateSettings],
+  );
 
-  const updateModelSettings = useCallback((modelSettings: Partial<UserSettings['modelSettings']>) => {
-    return updateSettings({ modelSettings: { ...settings.modelSettings, ...modelSettings } });
-  }, [settings, updateSettings]);
-
-  const updateDisplaySettings = useCallback((displaySettings: Partial<UserSettings['displaySettings']>) => {
-    return updateSettings({ displaySettings: { ...settings.displaySettings, ...displaySettings } });
-  }, [settings, updateSettings]);
-
-  const updateModelConfig = useCallback((modelConfig: Partial<UserSettings['modelConfig']>) => {
-    return updateSettings({ modelConfig: { ...settings.modelConfig, ...modelConfig } });
-  }, [settings, updateSettings]);
-
-  // Model management functions
-  const loadAvailableModels = useCallback(async () => {
-    try {
-      if (window.electronAPI?.getAvailableModels) {
-        const models = await window.electronAPI.getAvailableModels();
-        setAvailableModels(models);
-      } else {
-        // Fallback to default models
-        const defaultModels: ModelInfo[] = [
-          {
-            id: 'Qwen3-Omni-30B-A3B-Thinking',
-            name: 'Qwen3-Omni-30B-A3B-Thinking',
-            description: 'Advanced reasoning model for mathematical problem solving',
-            type: 'reasoning',
-            size: '58.0 GB',
-            memoryRequired: 32,
-            gpuRequired: true,
-            status: 'not_downloaded',
-            supportedLanguages: ['en', 'zh', 'es', 'fr', 'de', 'ja', 'ko'],
-            specialFeatures: ['chain_of_thought', 'mathematical_reasoning', 'step_by_step'],
-          },
-          {
-            id: 'Microsoft-VibeVoice-1.5B',
-            name: 'Microsoft VibeVoice 1.5B',
-            description: 'Natural sounding text-to-speech with educational optimization',
-            type: 'tts',
-            size: '3.2 GB',
-            memoryRequired: 4,
-            gpuRequired: false,
-            status: 'not_downloaded',
-            supportedLanguages: ['en', 'zh', 'es', 'fr', 'de', 'ja', 'ko'],
-            specialFeatures: ['educational_tone', 'clarity', 'mathematical_pronunciation'],
-          },
-          {
-            id: 'MERaLiON-AudioLLM-Whisper-SEA-LION',
-            name: 'MERaLiON-AudioLLM-Whisper-SEA-LION',
-            description: 'Enhanced speech recognition optimized for educational content',
-            type: 'stt',
-            size: '2.8 GB',
-            memoryRequired: 6,
-            gpuRequired: false,
-            status: 'not_downloaded',
-            supportedLanguages: ['en', 'zh', 'ms', 'id', 'th', 'vi', 'tl', 'ja', 'ko'],
-            specialFeatures: ['educational_content', 'mathematical_terms', 'classroom_noise_filtering'],
-          },
-        ];
-        setAvailableModels(defaultModels);
-      }
-    } catch (err) {
-      console.error('Failed to load available models:', err);
-      setError('Failed to load available models');
-    }
-  }, []);
-
-  const downloadModel = useCallback(async (modelId: string) => {
-    try {
-      setIsManagingModels(true);
-
-      if (window.electronAPI?.downloadModel) {
-        const result = await window.electronAPI.downloadModel(modelId);
-        // Update model status
-        setAvailableModels(prev => prev.map(model =>
-          model.id === modelId
-            ? { ...model, status: 'downloading', downloadProgress: 0 }
-            : model
-        ));
-        return result;
-      } else {
-        // Simulate download
-        setAvailableModels(prev => prev.map(model =>
-          model.id === modelId
-            ? { ...model, status: 'downloading', downloadProgress: 0 }
-            : model
-        ));
-
-        // Simulate download progress
-        let progress = 0;
-        const interval = setInterval(() => {
-          progress += Math.random() * 20;
-          if (progress >= 100) {
-            clearInterval(interval);
-            setAvailableModels(prev => prev.map(model =>
-              model.id === modelId
-                ? { ...model, status: 'loaded', downloadProgress: 100 }
-                : model
-            ));
-          } else {
-            setAvailableModels(prev => prev.map(model =>
-              model.id === modelId
-                ? { ...model, downloadProgress: progress }
-                : model
-            ));
-          }
-        }, 500);
-
-        return { success: true };
-      }
-    } catch (err) {
-      console.error('Failed to download model:', err);
-      setError('Failed to download model');
-      return { success: false, error: String(err) };
-    } finally {
-      setIsManagingModels(false);
-    }
-  }, []);
-
-  const optimizeModel = useCallback(async (modelId: string, optimizationType: string) => {
-    try {
-      setIsManagingModels(true);
-
-      if (window.electronAPI?.optimizeModel) {
-        const result = await window.electronAPI.optimizeModel(modelId, optimizationType);
-        return result;
-      } else {
-        // Simulate optimization
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        setAvailableModels(prev => prev.map(model =>
-          model.id === modelId
-            ? { ...model, isOptimized: true, optimizationType }
-            : model
-        ));
-
-        return { success: true };
-      }
-    } catch (err) {
-      console.error('Failed to optimize model:', err);
-      setError('Failed to optimize model');
-      return { success: false, error: String(err) };
-    } finally {
-      setIsManagingModels(false);
-    }
-  }, []);
-
-  const getModelPerformance = useCallback(async () => {
-    try {
-      if (window.electronAPI?.getModelPerformance) {
-        const performance = await window.electronAPI.getModelPerformance();
-        setModelPerformance(performance);
-      }
-    } catch (err) {
-      console.error('Failed to get model performance:', err);
-    }
-  }, []);
-
-  // Load settings and models on mount
   useEffect(() => {
     loadSettings();
-    loadAvailableModels();
-  }, [loadSettings, loadAvailableModels]);
+  }, [loadSettings]);
 
   return {
     settings,
     isLoading,
     error,
-    availableModels,
-    modelPerformance,
-    isManagingModels,
+    loadSettings,
     updateSettings,
     resetSettings,
     updateAudioSettings,
     updateModelSettings,
     updateDisplaySettings,
     updateModelConfig,
-    loadSettings,
-    loadAvailableModels,
-    downloadModel,
-    optimizeModel,
-    getModelPerformance,
   };
 };
 
-// Extend Window interface for Electron API
-declare global {
-  interface Window {
-    electronAPI?: {
-      getSettings: () => Promise<any>;
-      updateSettings: (settings: any) => Promise<boolean>;
-      getSystemInfo: () => Promise<any>;
-      openFile: () => Promise<any>;
-      saveFile: () => Promise<any>;
-      getVersion: () => string;
-      getAppVersion: () => string;
-      getAvailableModels: () => Promise<any>;
-      downloadModel: (modelId: string) => Promise<any>;
-      optimizeModel: (modelId: string, optimizationType: string) => Promise<any>;
-      getModelPerformance: () => Promise<any>;
-      getModelStatus: (modelId: string) => Promise<any>;
-    };
-  }
-}
+export type AppSettingsApi = ReturnType<typeof useAppSettings>;

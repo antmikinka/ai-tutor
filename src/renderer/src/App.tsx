@@ -1,98 +1,64 @@
-import React, { useEffect, useState } from 'react';
-import { Routes, Route } from 'react-router-dom';
-import { Box, CircularProgress, Alert, AlertTitle } from '@mui/material';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Routes, Route, Navigate } from 'react-router-dom';
+import { Box, CircularProgress, Typography } from '@mui/material';
+import { ThemeProvider } from '@mui/material/styles';
+import CssBaseline from '@mui/material/CssBaseline';
 import { MainLayout } from './components/layout/MainLayout';
 import { MathTutorPage } from './pages/MathTutorPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { HelpPage } from './pages/HelpPage';
-import { useAppSettings } from './hooks/useAppSettings';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { WebSocketProvider } from './contexts/WebSocketContext';
-import { SettingsProvider } from './contexts/SettingsContext';
+import { SettingsProvider, useSettingsContext } from './contexts/SettingsContext';
+import { buildTheme, resolveMode } from './theme';
 
-function App() {
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const { loadSettings } = useAppSettings();
+const ThemedShell: React.FC = () => {
+  const { settings, isLoading } = useSettingsContext();
+  const { theme: preference, fontSize } = settings.displaySettings;
 
+  // Re-evaluate "auto" when the OS colour scheme flips.
+  const [systemTick, setSystemTick] = useState(0);
   useEffect(() => {
-    // Initialize app and check backend connection
-    const initializeApp = async () => {
-      try {
-        setIsLoading(true);
+    if (preference !== 'auto' || !window.matchMedia) return;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => setSystemTick((t) => t + 1);
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, [preference]);
 
-        // Check if running in Electron environment
-        if (window.electronAPI) {
-          try {
-            const systemInfo = await window.electronAPI.getSystemInfo();
-            console.log('System Info:', systemInfo);
-          } catch (electronError) {
-            console.warn('Electron API not available, running in browser mode:', electronError);
-          }
-        } else {
-          console.log('Electron API not found, running in browser mode');
-        }
-
-        // Initialize settings with fallback
-        try {
-          await loadSettings();
-        } catch (settingsError) {
-          console.warn('Settings loading failed, using defaults:', settingsError);
-        }
-
-        setIsLoading(false);
-      } catch (err) {
-        console.error('Failed to initialize app:', err);
-        setError('Failed to initialize application. Please restart the application.');
-        setIsLoading(false);
-      }
-    };
-
-    initializeApp();
-  }, [loadSettings]);
-
-  if (isLoading) {
-    return (
-      <Box
-        display="flex"
-        justifyContent="center"
-        alignItems="center"
-        height="100vh"
-        flexDirection="column"
-        gap={2}
-      >
-        <CircularProgress size={48} />
-        <h2>Loading AI Math Tutor...</h2>
-      </Box>
-    );
-  }
-
-  if (error) {
-    return (
-      <Box m={4}>
-        <Alert severity="error">
-          <AlertTitle>Application Error</AlertTitle>
-          {error}
-        </Alert>
-      </Box>
-    );
-  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const theme = useMemo(() => buildTheme(resolveMode(preference), fontSize), [preference, fontSize, systemTick]);
 
   return (
-    <ErrorBoundary>
-      <SettingsProvider>
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
+      {isLoading ? (
+        <Box display="flex" justifyContent="center" alignItems="center" height="100vh" flexDirection="column" gap={2}>
+          <CircularProgress size={48} />
+          <Typography variant="h6">Loading AI Math Tutor…</Typography>
+        </Box>
+      ) : (
         <WebSocketProvider>
           <MainLayout>
             <Routes>
               <Route path="/" element={<MathTutorPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/help" element={<HelpPage />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </MainLayout>
         </WebSocketProvider>
-      </SettingsProvider>
-    </ErrorBoundary>
+      )}
+    </ThemeProvider>
   );
-}
+};
+
+const App: React.FC = () => (
+  <ErrorBoundary>
+    <SettingsProvider>
+      <ThemedShell />
+    </SettingsProvider>
+  </ErrorBoundary>
+);
 
 export default App;

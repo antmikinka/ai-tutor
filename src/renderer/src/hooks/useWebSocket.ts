@@ -1,155 +1,241 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { newClientId, resolveBackendUrl, toWebSocketUrl } from '../lib/backend';
+import type { Capabilities, InboundMessage, InboundType, MessageOf, OutboundMessage } from '../types/protocol';
 
-type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
+export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
-export interface WebSocketMessage {
-  type: string;
-  data: any;
-  timestamp: string;
+type Handler<T extends InboundType> = (message: MessageOf<T>) => void;
+
+interface PendingRequest {
+  resolve: (message: InboundMessage) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
-export const useWebSocket = (url?: string) => {
+const MAX_RECONNECT_DELAY_MS = 30_000;
+const HEARTBEAT_INTERVAL_MS = 25_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+export class WebSocketRequestError extends Error {
+  code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'WebSocketRequestError';
+    this.code = code;
+  }
+}
+
+/**
+ * Single, self-healing connection to the backend WebSocket.
+ *
+ * - `request()` correlates a reply via `request_id` and returns a Promise.
+ * - `subscribe()` registers listeners for unsolicited messages.
+ * - Intentional `disconnect()` never triggers a reconnect; unexpected drops
+ *   reconnect with capped exponential backoff.
+ */
+export const useWebSocket = () => {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
-  const [lastMessage, setLastMessage] = useState<WebSocketMessage | null>(null);
-  const [messages, setMessages] = useState<WebSocketMessage[]>([]);
+  const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const clientIdRef = useRef<string>(newClientId());
+  const intentionalCloseRef = useRef(false);
   const reconnectAttemptsRef = useRef(0);
-  const maxReconnectAttempts = 5;
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pendingRef = useRef<Map<string, PendingRequest>>(new Map());
+  const handlersRef = useRef<Map<InboundType, Set<Handler<any>>>>(new Map());
+  const requestCounterRef = useRef(0);
+
+  const clearTimers = () => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (heartbeatTimerRef.current) {
+      clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = null;
+    }
+  };
+
+  const failPending = (reason: string) => {
+    pendingRef.current.forEach((pending) => {
+      clearTimeout(pending.timer);
+      pending.reject(new WebSocketRequestError('DISCONNECTED', reason));
+    });
+    pendingRef.current.clear();
+  };
+
+  const dispatch = (message: InboundMessage) => {
+    if (message.request_id && pendingRef.current.has(message.request_id)) {
+      const pending = pendingRef.current.get(message.request_id)!;
+      pendingRef.current.delete(message.request_id);
+      clearTimeout(pending.timer);
+      if (message.type === 'error') {
+        pending.reject(new WebSocketRequestError(message.code, message.message));
+      } else {
+        pending.resolve(message);
+      }
+      return;
+    }
+    handlersRef.current.get(message.type)?.forEach((handler) => {
+      try {
+        handler(message);
+      } catch (error) {
+        console.error(`WebSocket handler for ${message.type} threw`, error);
+      }
+    });
+  };
+
+  const scheduleReconnect = useCallback((connectFn: () => void) => {
+    if (intentionalCloseRef.current) return;
+    reconnectAttemptsRef.current += 1;
+    const base = Math.min(MAX_RECONNECT_DELAY_MS, 1000 * 2 ** reconnectAttemptsRef.current);
+    const delay = base / 2 + Math.random() * (base / 2); // jitter
+    reconnectTimerRef.current = setTimeout(connectFn, delay);
+  }, []);
 
   const connect = useCallback(async () => {
-    try {
-      setConnectionStatus('connecting');
-
-      // Get WebSocket URL from settings or use default
-      let wsUrl = url || 'ws://localhost:8000/ws/test-client';
-
-      // Check if we're getting settings from Electron API
-      if (window.electronAPI?.getSettings) {
-        try {
-          const settings = await window.electronAPI.getSettings();
-          console.log('Settings retrieved:', settings);
-          if (settings?.websocketUrl) {
-            wsUrl = settings.websocketUrl;
-            console.log('Using WebSocket URL from settings:', wsUrl);
-          }
-        } catch (error) {
-          console.warn('Failed to get settings from Electron API:', error);
-        }
-      } else {
-        console.log('Electron API not available, using default WebSocket URL:', wsUrl);
-      }
-
-      wsRef.current = new WebSocket(wsUrl);
-
-      wsRef.current.onopen = () => {
-        console.log('WebSocket connected');
-        setConnectionStatus('connected');
-        reconnectAttemptsRef.current = 0;
-      };
-
-      wsRef.current.onmessage = (event) => {
-        try {
-          const message: WebSocketMessage = JSON.parse(event.data);
-          setLastMessage(message);
-          setMessages(prev => [...prev, message]);
-
-          // Handle specific message types
-          if (message.type === 'connection_established') {
-            console.log('Connection established with backend');
-          }
-        } catch (error) {
-          console.error('Error parsing WebSocket message:', error);
-        }
-      };
-
-      wsRef.current.onclose = (event) => {
-        console.log('WebSocket disconnected:', event.code, event.reason);
-        setConnectionStatus('disconnected');
-
-        // Attempt to reconnect
-        if (reconnectAttemptsRef.current < maxReconnectAttempts) {
-          reconnectAttemptsRef.current++;
-          const timeout = Math.pow(2, reconnectAttemptsRef.current) * 1000; // Exponential backoff
-
-          console.log(`Attempting to reconnect in ${timeout}ms...`);
-          reconnectTimeoutRef.current = setTimeout(() => {
-            connect();
-          }, timeout);
-        }
-      };
-
-      wsRef.current.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        console.error('WebSocket URL:', wsUrl);
-        console.error('WebSocket readyState:', wsRef.current?.readyState);
-        setConnectionStatus('error');
-      };
-    } catch (error) {
-      console.error('Failed to connect to WebSocket:', error);
-      setConnectionStatus('error');
+    if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+      return;
     }
-  }, [url]);
+    clearTimers();
+    intentionalCloseRef.current = false;
+    setConnectionStatus('connecting');
+
+    let url: string;
+    try {
+      url = toWebSocketUrl(await resolveBackendUrl(), clientIdRef.current);
+    } catch (error) {
+      setConnectionStatus('error');
+      setLastError(String(error));
+      scheduleReconnect(connect);
+      return;
+    }
+
+    const ws = new WebSocket(url);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      reconnectAttemptsRef.current = 0;
+      setLastError(null);
+      setConnectionStatus('connected');
+      heartbeatTimerRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
+      }, HEARTBEAT_INTERVAL_MS);
+    };
+
+    ws.onmessage = (event) => {
+      let parsed: InboundMessage;
+      try {
+        parsed = JSON.parse(event.data);
+      } catch {
+        console.warn('Ignoring non-JSON WebSocket frame');
+        return;
+      }
+      if (parsed.type === 'connected') setCapabilities(parsed.capabilities);
+      dispatch(parsed);
+    };
+
+    ws.onerror = () => {
+      setLastError(`Cannot reach backend at ${url}`);
+      setConnectionStatus('error');
+    };
+
+    ws.onclose = (event) => {
+      clearTimers();
+      if (wsRef.current === ws) wsRef.current = null;
+      setCapabilities(null);
+      failPending(`Connection closed (${event.code})`);
+      if (intentionalCloseRef.current) {
+        setConnectionStatus('disconnected');
+        return;
+      }
+      setConnectionStatus('disconnected');
+      scheduleReconnect(connect);
+    };
+  }, [scheduleReconnect]);
 
   const disconnect = useCallback(() => {
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
+    intentionalCloseRef.current = true;
+    clearTimers();
+    const ws = wsRef.current;
+    wsRef.current = null;
+    if (ws && ws.readyState !== WebSocket.CLOSED) {
+      ws.close(1000, 'client closing');
     }
-
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-
+    failPending('Disconnected by client');
     setConnectionStatus('disconnected');
   }, []);
 
-  const sendMessage = useCallback((message: any) => {
-    if (wsRef.current && connectionStatus === 'connected') {
-      const websocketMessage: WebSocketMessage = {
-        type: message.type || 'message',
-        data: message,
-        timestamp: new Date().toISOString(),
-      };
-
-      wsRef.current.send(JSON.stringify(websocketMessage));
-    } else {
-      console.warn('Cannot send message: WebSocket not connected');
+  const sendMessage = useCallback((message: OutboundMessage): boolean => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn('Cannot send: WebSocket not connected');
+      return false;
     }
-  }, [connectionStatus]);
-
-  const clearMessages = useCallback(() => {
-    setMessages([]);
-    setLastMessage(null);
+    ws.send(JSON.stringify(message));
+    return true;
   }, []);
 
-  // Auto-connect on mount
+  const request = useCallback(
+    <T extends InboundType>(message: OutboundMessage, expect: T, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<MessageOf<T>> => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return Promise.reject(new WebSocketRequestError('DISCONNECTED', 'Backend is not connected'));
+      }
+      requestCounterRef.current += 1;
+      const requestId = `${clientIdRef.current}-${requestCounterRef.current}`;
+      return new Promise<MessageOf<T>>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingRef.current.delete(requestId);
+          reject(new WebSocketRequestError('TIMEOUT', 'The backend did not answer in time'));
+        }, timeoutMs);
+        pendingRef.current.set(requestId, {
+          timer,
+          reject,
+          resolve: (reply) => {
+            if (reply.type === expect) {
+              resolve(reply as MessageOf<T>);
+            } else {
+              reject(new WebSocketRequestError('UNEXPECTED_REPLY', `Expected ${expect}, got ${reply.type}`));
+            }
+          },
+        });
+        ws.send(JSON.stringify({ ...message, request_id: requestId }));
+      });
+    },
+    [],
+  );
+
+  const subscribe = useCallback(<T extends InboundType>(type: T, handler: Handler<T>) => {
+    if (!handlersRef.current.has(type)) handlersRef.current.set(type, new Set());
+    handlersRef.current.get(type)!.add(handler);
+    return () => {
+      handlersRef.current.get(type)?.delete(handler);
+    };
+  }, []);
+
   useEffect(() => {
     connect();
-
     return () => {
       disconnect();
     };
   }, [connect, disconnect]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-    };
-  }, []);
-
   return {
     connectionStatus,
-    lastMessage,
-    messages,
-    sendMessage,
+    capabilities,
+    lastError,
+    clientId: clientIdRef.current,
     connect,
     disconnect,
-    clearMessages,
+    sendMessage,
+    request,
+    subscribe,
   };
 };
+
+export type WebSocketApi = ReturnType<typeof useWebSocket>;

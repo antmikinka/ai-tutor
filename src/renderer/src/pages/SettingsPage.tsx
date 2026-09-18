@@ -1,937 +1,459 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   Box,
-  Typography,
-  TextField,
-  Switch,
-  FormControlLabel,
   Button,
-  Grid,
   Card,
   CardContent,
   CardHeader,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
-  Slider,
-  Alert,
-  CircularProgress,
-  LinearProgress,
   Chip,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  List,
-  ListItem,
-  ListItemText,
-  } from '@mui/material';
-import {
-  Save,
-  Refresh,
-  VolumeUp,
-  Mic,
-  Monitor,
-  Memory,
-  Download,
-  Delete,
-  CheckCircle,
-  Error,
-  Info,
-  Timer,
-  Storage,
-  Speed,
-} from '@mui/icons-material';
-import { styled, useTheme } from '@mui/material/styles';
+  CircularProgress,
+  FormControl,
+  FormControlLabel,
+  Grid,
+  InputLabel,
+  LinearProgress,
+  MenuItem,
+  Select,
+  Slider,
+  Snackbar,
+  Stack,
+  Switch,
+  Tooltip,
+  Typography,
+} from '@mui/material';
+import { CheckCircle, Delete, Download, ErrorOutline, Memory, Mic, Monitor, Refresh, Save, Speed, VolumeUp } from '@mui/icons-material';
+import { styled } from '@mui/material/styles';
 import { useSettingsContext } from '../contexts/SettingsContext';
-import { useAppSettings } from '../hooks/useAppSettings';
+import { ApiError, apiFetch } from '../lib/backend';
+import type { BackendModel, BackendModelStatus, SystemResources, UserSettings } from '../types/MathTypes';
 
-// Types for model management
-interface ModelStatus {
-  model_name: string;
-  status: 'not_loaded' | 'loading' | 'loaded' | 'error' | 'unloading';
-  device?: string;
-  memory_usage: number;
-  loading_progress: number;
-  loaded_at?: string;
-  error?: string;
-  timestamp: string;
-}
-
-interface ModelType {
-  name: string;
-  description: string;
-  estimated_size_mb: number;
-  loading_time_estimate: number;
-  icon: React.ReactNode;
-}
-
-interface SystemResources {
-  cpu: { percent_used: number; count: number; count_logical: number };
-  memory: { total_gb: number; available_gb: number; used_gb: number; percent_used: number };
-  disk: { total_gb: number; free_gb: number; used_gb: number; percent_used: number };
-  gpu: Array<{
-    device_id: number;
-    name: string;
-    memory_total_gb: number;
-    memory_allocated_gb: number;
-    memory_cached_gb: number;
-  }>;
-}
-
-const SettingsContainer = styled(Box)(({ theme }) => ({
+const Container = styled(Box)(({ theme }) => ({
   padding: theme.spacing(3),
-  maxWidth: 1200,
+  maxWidth: 1100,
   margin: '0 auto',
 }));
 
-const ModelCard = styled(Card)(({ theme }) => ({
-  height: '100%',
-  display: 'flex',
-  flexDirection: 'column',
-  transition: 'transform 0.2s',
-  '&:hover': {
-    transform: 'translateY(-2px)',
-  },
-}));
-
-const StatusChip = styled(Chip)(({ theme, status }: { theme: any; status: string }) => {
-  const colors: { [key: string]: string } = {
-    loaded: theme.palette.success.main,
-    loading: theme.palette.warning.main,
-    not_loaded: theme.palette.grey[500],
-    error: theme.palette.error.main,
-    unloading: theme.palette.info.main,
-  };
-
-  return {
-    backgroundColor: colors[status] || colors.not_loaded,
-    color: theme.palette.getContrastText(colors[status] || colors.not_loaded),
-    fontWeight: 'bold',
-  };
-});
-
-const SettingsCard = styled(Card)(({ theme }) => ({
+const Section = styled(Card)(({ theme }) => ({
   marginBottom: theme.spacing(3),
 }));
 
+const STATUS_META: Record<BackendModelStatus, { label: string; color: 'success' | 'warning' | 'error' | 'default' | 'info' }> = {
+  loaded: { label: 'Loaded', color: 'success' },
+  loading: { label: 'Loading', color: 'warning' },
+  error: { label: 'Error', color: 'error' },
+  available: { label: 'Downloaded', color: 'info' },
+  not_downloaded: { label: 'Not downloaded', color: 'default' },
+  unavailable: { label: 'ML stack missing', color: 'default' },
+};
+
+const MODEL_ICON: Record<string, React.ReactNode> = {
+  reasoning: <Memory />,
+  tts: <VolumeUp />,
+  fallback_tts: <VolumeUp />,
+  stt: <Mic />,
+  fallback_stt: <Mic />,
+};
+
+const gb = (value?: number | null) => (value == null ? '—' : `${value.toFixed(1)} GB`);
+const mb = (value: number) => (value >= 1024 ? `${(value / 1024).toFixed(1)} GB` : `${value.toFixed(0)} MB`);
+
+const POLL_MS = 4000;
+
 export const SettingsPage: React.FC = () => {
-  const theme = useTheme();
-  const { settings, updateSettings, isLoading, error } = useSettingsContext();
-  const { resetSettings } = useAppSettings();
-  const [localSettings, setLocalSettings] = useState(settings);
-  const [hasChanges, setHasChanges] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
+  const { settings, updateSettings, resetSettings, isLoading, error } = useSettingsContext();
+  const [draft, setDraft] = useState<UserSettings>(settings);
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
 
-  // Model management state
-  const [modelStatuses, setModelStatuses] = useState<ModelStatus[]>([]);
-  const [systemResources, setSystemResources] = useState<SystemResources | null>(null);
-  const [loadingActions, setLoadingActions] = useState<{[key: string]: boolean}>({});
-  const [selectedModel, setSelectedModel] = useState<string | null>(null);
-  const [showResourceDialog, setShowResourceDialog] = useState(false);
-  const [autoLoadEnabled, setAutoLoadEnabled] = useState(true);
+  const [models, setModels] = useState<BackendModel[] | null>(null);
+  const [resources, setResources] = useState<SystemResources | null>(null);
+  const [backendError, setBackendError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [autoLoad, setAutoLoad] = useState<{ enabled: boolean; models: string[] } | null>(null);
+  const [devices, setDevices] = useState<{ inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }>({ inputs: [], outputs: [] });
 
-  // Model types configuration
-  const modelTypes: {[key: string]: ModelType} = {
-    ai: {
-      name: 'Qwen3-Omni-30B-A3B-Thinking',
-      description: 'AI Math Tutor Model',
-      estimated_size_mb: 15000,
-      loading_time_estimate: 120,
-      icon: <Memory />
-    },
-    tts: {
-      name: 'VibeVoice',
-      description: 'Text-to-Speech Model',
-      estimated_size_mb: 2000,
-      loading_time_estimate: 30,
-      icon: <VolumeUp />
-    },
-    stt: {
-      name: 'MERaLiON',
-      description: 'Speech-to-Text Model',
-      estimated_size_mb: 1500,
-      loading_time_estimate: 25,
-      icon: <Mic />
-    },
-    whisper: {
-      name: 'Whisper',
-      description: 'OpenAI Whisper Model',
-      estimated_size_mb: 750,
-      loading_time_estimate: 15,
-      icon: <Mic />
-    },
-    xtts: {
-      name: 'XTTS-v2',
-      description: 'Coqui XTTS Model',
-      estimated_size_mb: 500,
-      loading_time_estimate: 10,
-      icon: <VolumeUp />
+  const pollTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+
+  useEffect(() => setDraft(settings), [settings]);
+  const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(settings), [draft, settings]);
+
+  // ---- backend data ------------------------------------------------------
+
+  const refresh = useCallback(async () => {
+    try {
+      const [modelsBody, resourcesBody, persistence] = await Promise.all([
+        apiFetch<{ models: BackendModel[] }>('/api/models'),
+        apiFetch<SystemResources>('/api/models/system/resources'),
+        apiFetch<{ config: { enabled: boolean; models: string[] } }>('/api/models/persistence/config'),
+      ]);
+      setModels(modelsBody.models);
+      setResources(resourcesBody);
+      setAutoLoad(persistence.config);
+      setBackendError(null);
+    } catch (err) {
+      setBackendError(err instanceof Error ? err.message : 'Backend unreachable');
     }
-  };
-
-  useEffect(() => {
-    setLocalSettings(settings);
-    setHasChanges(false);
-  }, [settings]);
-
-  // Model management effects
-  useEffect(() => {
-    fetchModelStatuses();
-    fetchSystemResources();
-
-    // Set up polling for model status updates
-    const interval = setInterval(() => {
-      fetchModelStatuses();
-    }, 5000);
-
-    return () => clearInterval(interval);
   }, []);
 
-  // API functions for model management
-  const fetchModelStatuses = async () => {
-    try {
-      const response = await fetch('/api/models');
-      if (response.ok) {
-        const data = await response.json();
-        setModelStatuses(data.models);
-        setSystemResources(data.system_memory);
-      }
-    } catch (error) {
-      console.error('Error fetching model statuses:', error);
-    }
-  };
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => void refresh(), 15_000);
+    return () => clearInterval(timer);
+  }, [refresh]);
 
-  const fetchSystemResources = async () => {
-    try {
-      const response = await fetch('/api/models/system/resources');
-      if (response.ok) {
-        const data = await response.json();
-        setSystemResources(data);
-      }
-    } catch (error) {
-      console.error('Error fetching system resources:', error);
-    }
-  };
-
-  const loadModel = async (modelType: string) => {
-    try {
-      setLoadingActions(prev => ({ ...prev, [modelType]: true }));
-
-      const response = await fetch(`/api/models/load/${modelType}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model_type: modelType,
-          options: { auto_load: autoLoadEnabled }
+  useEffect(() => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    navigator.mediaDevices
+      .enumerateDevices()
+      .then((list) =>
+        setDevices({
+          inputs: list.filter((d) => d.kind === 'audioinput'),
+          outputs: list.filter((d) => d.kind === 'audiooutput'),
         }),
-      });
+      )
+      .catch(() => undefined);
+  }, []);
 
-      if (response.ok) {
-        // Start polling for updates
-        const pollInterval = setInterval(async () => {
-          await fetchModelStatuses();
+  useEffect(() => () => Object.values(pollTimers.current).forEach(clearInterval), []);
 
-          // Check if model is loaded or error occurred
-          const currentStatus = modelStatuses.find(
-            status => status.model_name === modelTypes[modelType].name
-          );
-
-          if (currentStatus && (currentStatus.status === 'loaded' || currentStatus.status === 'error')) {
-            clearInterval(pollInterval);
-            setLoadingActions(prev => ({ ...prev, [modelType]: false }));
-          }
-        }, 1000);
-      } else {
-        console.error('Error loading model:', response.statusText);
-        setLoadingActions(prev => ({ ...prev, [modelType]: false }));
-      }
-    } catch (error) {
-      console.error('Error loading model:', error);
-      setLoadingActions(prev => ({ ...prev, [modelType]: false }));
-    }
-  };
-
-  const unloadModel = async (modelType: string) => {
-    try {
-      setLoadingActions(prev => ({ ...prev, [modelType]: true }));
-
-      const response = await fetch(`/api/models/unload/${modelType}`, {
-        method: 'DELETE',
-      });
-
-      if (response.ok) {
-        await fetchModelStatuses();
-      } else {
-        console.error('Error unloading model:', response.statusText);
-      }
-    } catch (error) {
-      console.error('Error unloading model:', error);
-    } finally {
-      setLoadingActions(prev => ({ ...prev, [modelType]: false }));
-    }
-  };
-
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'loaded':
-        return <CheckCircle color="success" />;
-      case 'loading':
-        return <CircularProgress size={20} />;
-      case 'error':
-        return <Error color="error" />;
-      case 'unloading':
-        return <Timer color="info" />;
-      default:
-        return <Info color="disabled" />;
-    }
-  };
-
-  const formatMemory = (mb: number) => {
-    if (mb >= 1024) {
-      return `${(mb / 1024).toFixed(1)} GB`;
-    }
-    return `${mb.toFixed(0)} MB`;
-  };
-
-  const formatTime = (seconds: number) => {
-    if (seconds >= 60) {
-      return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-    }
-    return `${seconds}s`;
-  };
-
-  const handleSettingChange = (section: keyof typeof settings, field: string, value: any) => {
-    setLocalSettings(prev => {
-      const prevSettings = prev as any;
-      return {
-        ...prev,
-        [section]: {
-          ...prevSettings[section],
-          [field]: value,
-        },
-      };
-    });
-    setHasChanges(true);
-  };
-
-  const handleSaveSettings = async () => {
-    setIsSaving(true);
-    try {
-      await updateSettings(localSettings);
-      setHasChanges(false);
-    } catch (error) {
-      console.error('Failed to save settings:', error);
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleResetSettings = async () => {
-    if (window.confirm('Are you sure you want to reset all settings to default?')) {
-      setIsSaving(true);
+  const pollUntilSettled = (name: string) => {
+    if (pollTimers.current[name]) clearInterval(pollTimers.current[name]);
+    pollTimers.current[name] = setInterval(async () => {
       try {
-        await resetSettings();
-        setHasChanges(false);
-      } catch (error) {
-        console.error('Failed to reset settings:', error);
-      } finally {
-        setIsSaving(false);
+        const info = await apiFetch<BackendModel>(`/api/models/${encodeURIComponent(name)}/status`);
+        setModels((prev) => prev?.map((m) => (m.name === name ? { ...m, ...info } : m)) ?? prev);
+        if (info.status !== 'loading') {
+          clearInterval(pollTimers.current[name]);
+          delete pollTimers.current[name];
+          setBusy((b) => ({ ...b, [name]: false }));
+          setToast(info.status === 'loaded' ? `${name} loaded` : `${name}: ${info.error || info.status}`);
+        }
+      } catch {
+        clearInterval(pollTimers.current[name]);
+        delete pollTimers.current[name];
+        setBusy((b) => ({ ...b, [name]: false }));
       }
+    }, POLL_MS);
+  };
+
+  const loadModel = async (model: BackendModel) => {
+    setBusy((b) => ({ ...b, [model.name]: true }));
+    try {
+      const result = await apiFetch<{ status: string; message: string }>(`/api/models/load/${encodeURIComponent(model.name)}`, {
+        method: 'POST',
+        body: JSON.stringify({ options: {}, wait: false }),
+      });
+      setToast(result.message);
+      if (result.status === 'loading') pollUntilSettled(model.name);
+      else {
+        setBusy((b) => ({ ...b, [model.name]: false }));
+        void refresh();
+      }
+    } catch (err) {
+      setBusy((b) => ({ ...b, [model.name]: false }));
+      setToast(err instanceof ApiError ? String(err.detail ?? err.message) : String(err));
     }
+  };
+
+  const unloadModel = async (model: BackendModel) => {
+    setBusy((b) => ({ ...b, [model.name]: true }));
+    try {
+      await apiFetch(`/api/models/unload/${encodeURIComponent(model.name)}`, { method: 'DELETE' });
+      setToast(`${model.name} unloaded`);
+      await refresh();
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy((b) => ({ ...b, [model.name]: false }));
+    }
+  };
+
+  const toggleAutoLoad = async (enabled: boolean) => {
+    const next = { enabled, models: autoLoad?.models ?? [] };
+    setAutoLoad(next);
+    try {
+      await apiFetch('/api/models/persistence/config', { method: 'POST', body: JSON.stringify(next) });
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // ---- local settings ----------------------------------------------------
+
+  const setField = <S extends keyof UserSettings>(section: S, patch: Partial<UserSettings[S]>) =>
+    setDraft((prev) => ({ ...prev, [section]: { ...(prev[section] as object), ...patch } }));
+
+  const save = async () => {
+    setSaving(true);
+    const ok = await updateSettings(draft);
+    setSaving(false);
+    setToast(ok ? 'Settings saved' : 'Failed to save settings');
+  };
+
+  const reset = async () => {
+    if (!window.confirm('Reset all settings to their defaults?')) return;
+    setSaving(true);
+    await resetSettings();
+    setSaving(false);
+    setToast('Settings reset');
   };
 
   if (isLoading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" height="100vh">
+      <Box display="flex" justifyContent="center" alignItems="center" height="60vh">
         <CircularProgress />
       </Box>
     );
   }
 
-  if (error) {
-    return (
-      <SettingsContainer>
-        <Alert severity="error">{error}</Alert>
-      </SettingsContainer>
-    );
-  }
+  const mlStackMissing = resources && resources.ml_stack && resources.ml_stack.torch === false;
 
   return (
-    <SettingsContainer>
-      <Typography variant="h4" component="h1" gutterBottom>
-        Settings
-      </Typography>
+    <Container>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+        <Typography variant="h4" component="h1">
+          Settings
+        </Typography>
+        <Stack direction="row" spacing={1}>
+          <Button variant="outlined" color="error" onClick={reset} disabled={saving}>
+            Reset to defaults
+          </Button>
+          <Button variant="contained" onClick={save} disabled={saving || !dirty} startIcon={saving ? <CircularProgress size={18} /> : <Save />}>
+            Save
+          </Button>
+        </Stack>
+      </Stack>
 
-      {hasChanges && (
-        <Alert severity="info" sx={{ mb: 2 }}>
-          You have unsaved changes. Don't forget to save your settings.
-        </Alert>
-      )}
+      {error && <Alert severity="warning" sx={{ mb: 2 }}>{error}</Alert>}
+      {dirty && <Alert severity="info" sx={{ mb: 2 }}>You have unsaved changes.</Alert>}
 
-      {/* Audio Settings */}
-      <SettingsCard>
-        <CardHeader
-          avatar={<VolumeUp />}
-          title="Audio Settings"
-          subheader="Configure speech recognition and text-to-speech options"
-        />
-        <CardContent>
-          <Grid container spacing={3}>
-            <Grid item xs={12} md={6}>
-              <FormControl fullWidth>
-                <InputLabel>Input Device</InputLabel>
-                <Select
-                  value={localSettings.audioSettings.inputDevice}
-                  label="Input Device"
-                  onChange={(e) => handleSettingChange('audioSettings', 'inputDevice', e.target.value)}
-                >
-                  <MenuItem value="default">Default Microphone</MenuItem>
-                  <MenuItem value="microphone-1">Microphone 1</MenuItem>
-                  <MenuItem value="microphone-2">Microphone 2</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-
-            <Grid item xs={12} md={6}>
-              <FormControl fullWidth>
-                <InputLabel>Output Device</InputLabel>
-                <Select
-                  value={localSettings.audioSettings.outputDevice}
-                  label="Output Device"
-                  onChange={(e) => handleSettingChange('audioSettings', 'outputDevice', e.target.value)}
-                >
-                  <MenuItem value="default">Default Speaker</MenuItem>
-                  <MenuItem value="speaker-1">Speaker 1</MenuItem>
-                  <MenuItem value="headphones">Headphones</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-
-            <Grid item xs={12}>
-              <Typography gutterBottom>Volume</Typography>
-              <Slider
-                value={localSettings.audioSettings.volume * 100}
-                onChange={(_, value) => handleSettingChange('audioSettings', 'volume', value as number / 100)}
-                valueLabelDisplay="auto"
-                min={0}
-                max={100}
-              />
-              <Typography variant="caption" color="text.secondary">
-                Current: {Math.round(localSettings.audioSettings.volume * 100)}%
-              </Typography>
-            </Grid>
-
-            <Grid item xs={12} md={6}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={localSettings.audioSettings.enableSpeechRecognition}
-                    onChange={(e) => handleSettingChange('audioSettings', 'enableSpeechRecognition', e.target.checked)}
-                  />
-                }
-                label="Enable Speech Recognition"
-              />
-            </Grid>
-
-            <Grid item xs={12} md={6}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={localSettings.audioSettings.enableTextToSpeech}
-                    onChange={(e) => handleSettingChange('audioSettings', 'enableTextToSpeech', e.target.checked)}
-                  />
-                }
-                label="Enable Text-to-Speech"
-              />
-            </Grid>
-          </Grid>
-        </CardContent>
-      </SettingsCard>
-
-      {/* AI Model Settings */}
-      <SettingsCard>
-        <CardHeader
-          avatar={<Memory />}
-          title="AI Model Settings"
-          subheader="Configure AI model parameters and performance options"
-        />
-        <CardContent>
-          <Grid container spacing={3}>
-            <Grid item xs={12}>
-              <TextField
-                fullWidth
-                label="Model Path"
-                value={localSettings.modelSettings.modelPath}
-                onChange={(e) => handleSettingChange('modelSettings', 'modelPath', e.target.value)}
-                helperText="Path to the AI model files"
-              />
-            </Grid>
-
-            <Grid item xs={12}>
-              <Typography gutterBottom>Creativity (Temperature)</Typography>
-              <Slider
-                value={localSettings.modelSettings.temperature * 100}
-                onChange={(_, value) => handleSettingChange('modelSettings', 'temperature', value as number / 100)}
-                valueLabelDisplay="auto"
-                min={0}
-                max={100}
-              />
-              <Typography variant="caption" color="text.secondary">
-                Current: {Math.round(localSettings.modelSettings.temperature * 100)}%
-                (Higher values make the AI more creative, lower values make it more focused)
-              </Typography>
-            </Grid>
-
-            <Grid item xs={12}>
-              <Typography gutterBottom>Response Length (Max Tokens)</Typography>
-              <Slider
-                value={localSettings.modelSettings.maxTokens}
-                onChange={(_, value) => handleSettingChange('modelSettings', 'maxTokens', value as number)}
-                valueLabelDisplay="auto"
-                min={256}
-                max={4096}
-                step={256}
-              />
-              <Typography variant="caption" color="text.secondary">
-                Current: {localSettings.modelSettings.maxTokens} tokens
-              </Typography>
-            </Grid>
-
-            <Grid item xs={12}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={localSettings.modelSettings.useGPU}
-                    onChange={(e) => handleSettingChange('modelSettings', 'useGPU', e.target.checked)}
-                  />
-                }
-                label="Use GPU Acceleration"
-              />
-            </Grid>
-          </Grid>
-        </CardContent>
-      </SettingsCard>
-
-      {/* Model Management */}
-      <SettingsCard>
-        <CardHeader
-          avatar={<Memory />}
-          title="Model Management"
-          subheader="Manually load and unload AI models"
-          action={
-            <Box sx={{ display: 'flex', gap: 1 }}>
-              <Button
-                size="small"
-                onClick={() => setShowResourceDialog(true)}
-                startIcon={<Speed />}
-              >
-                System Resources
-              </Button>
-              <Button
-                size="small"
-                onClick={fetchModelStatuses}
-                startIcon={<Refresh />}
-              >
-                Refresh
-              </Button>
-            </Box>
-          }
-        />
-        <CardContent>
-          {/* System Resource Overview */}
-          {systemResources && (
-            <Box sx={{ mb: 3, p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
-              <Grid container spacing={2}>
-                <Grid item xs={12} md={3}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Speed color="primary" />
-                    <Box>
-                      <Typography variant="body2" color="text.secondary">CPU</Typography>
-                      <Typography variant="h6">{systemResources.cpu.percent_used}%</Typography>
-                    </Box>
-                  </Box>
-                </Grid>
-                <Grid item xs={12} md={3}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Storage color="primary" />
-                    <Box>
-                      <Typography variant="body2" color="text.secondary">Memory</Typography>
-                      <Typography variant="h6">{systemResources.memory.percent_used}%</Typography>
-                      <Typography variant="caption">
-                        {systemResources.memory.available_gb.toFixed(1)} GB free
-                      </Typography>
-                    </Box>
-                  </Box>
-                </Grid>
-                <Grid item xs={12} md={3}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Timer color="primary" />
-                    <Box>
-                      <Typography variant="body2" color="text.secondary">Models</Typography>
-                      <Typography variant="h6">
-                        {modelStatuses.filter(m => m.status === 'loaded').length} loaded
-                      </Typography>
-                    </Box>
-                  </Box>
-                </Grid>
-                <Grid item xs={12} md={3}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Storage color="primary" />
-                    <Box>
-                      <Typography variant="body2" color="text.secondary">Total Model Memory</Typography>
-                      <Typography variant="h6">
-                        {formatMemory(modelStatuses.reduce((sum, m) => sum + m.memory_usage, 0))}
-                      </Typography>
-                    </Box>
-                  </Box>
-                </Grid>
-              </Grid>
-            </Box>
-          )}
-
-          {/* Auto-load Toggle */}
-          <Box sx={{ mb: 3 }}>
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={autoLoadEnabled}
-                  onChange={(e) => setAutoLoadEnabled(e.target.checked)}
-                />
-              }
-              label="Auto-load models on startup"
-            />
-            <Typography variant="caption" color="text.secondary" display="block">
-              When enabled, models will be loaded automatically when the application starts
-            </Typography>
-          </Box>
-
-          {/* Model Cards */}
-          <Grid container spacing={3}>
-            {Object.entries(modelTypes).map(([modelType, modelInfo]) => {
-              const modelStatus = modelStatuses.find(m => m.model_name === modelInfo.name);
-              const isLoading = loadingActions[modelType] || modelStatus?.status === 'loading';
-
-              return (
-                <Grid item xs={12} md={6} lg={4} key={modelType}>
-                  <ModelCard>
-                    <CardHeader
-                      avatar={modelInfo.icon}
-                      title={
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                          {modelInfo.name}
-                          {modelStatus && getStatusIcon(modelStatus.status)}
-                        </Box>
-                      }
-                      subheader={modelInfo.description}
-                      action={
-                        <StatusChip
-                          theme={theme}
-                          status={modelStatus?.status || 'not_loaded'}
-                          label={modelStatus?.status?.replace('_', ' ') || 'Not Loaded'}
-                          size="small"
-                        />
-                      }
-                    />
-                    <CardContent>
-                      {/* Model Info */}
-                      <Box sx={{ mb: 2 }}>
-                        <Grid container spacing={1}>
-                          <Grid item xs={6}>
-                            <Typography variant="caption" color="text.secondary">
-                              Size
-                            </Typography>
-                            <Typography variant="body2">
-                              {formatMemory(modelInfo.estimated_size_mb)}
-                            </Typography>
-                          </Grid>
-                          <Grid item xs={6}>
-                            <Typography variant="caption" color="text.secondary">
-                              Load Time
-                            </Typography>
-                            <Typography variant="body2">
-                              {formatTime(modelInfo.loading_time_estimate)}
-                            </Typography>
-                          </Grid>
-                        </Grid>
-                      </Box>
-
-                      {/* Progress Bar */}
-                      {modelStatus && (modelStatus.status === 'loading' || modelStatus.status === 'unloading') && (
-                        <Box sx={{ mb: 2 }}>
-                          <LinearProgress
-                            variant="determinate"
-                            value={modelStatus.loading_progress}
-                            sx={{ height: 6, borderRadius: 3 }}
-                          />
-                          <Typography variant="caption" color="text.secondary">
-                            {modelStatus.loading_progress.toFixed(0)}% complete
-                          </Typography>
-                        </Box>
-                      )}
-
-                      {/* Status Details */}
-                      {modelStatus && (
-                        <Box sx={{ mb: 2 }}>
-                          {modelStatus.status === 'loaded' && (
-                            <Box>
-                              <Typography variant="caption" color="text.secondary">
-                                Device: {modelStatus.device}
-                              </Typography>
-                              <Typography variant="caption" color="text.secondary" display="block">
-                                Memory: {formatMemory(modelStatus.memory_usage)}
-                              </Typography>
-                              {modelStatus.loaded_at && (
-                                <Typography variant="caption" color="text.secondary" display="block">
-                                  Loaded: {new Date(modelStatus.loaded_at).toLocaleTimeString()}
-                                </Typography>
-                              )}
-                            </Box>
-                          )}
-                          {modelStatus.status === 'error' && (
-                            <Typography variant="caption" color="error" display="block">
-                              {modelStatus.error}
-                            </Typography>
-                          )}
-                        </Box>
-                      )}
-
-                      {/* Action Buttons */}
-                      <Box sx={{ display: 'flex', gap: 1 }}>
-                        {modelStatus?.status === 'loaded' ? (
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            color="error"
-                            onClick={() => unloadModel(modelType)}
-                            disabled={isLoading}
-                            startIcon={isLoading ? <CircularProgress size={16} /> : <Delete />}
-                          >
-                            Unload
-                          </Button>
-                        ) : (
-                          <Button
-                            size="small"
-                            variant="contained"
-                            onClick={() => loadModel(modelType)}
-                            disabled={isLoading}
-                            startIcon={isLoading ? <CircularProgress size={16} /> : <Download />}
-                          >
-                            Load
-                          </Button>
-                        )}
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          onClick={() => setSelectedModel(modelType)}
-                        >
-                          Details
-                        </Button>
-                      </Box>
-                    </CardContent>
-                  </ModelCard>
-                </Grid>
-              );
-            })}
-          </Grid>
-        </CardContent>
-      </SettingsCard>
-
-      {/* Display Settings */}
-      <SettingsCard>
-        <CardHeader
-          avatar={<Monitor />}
-          title="Display Settings"
-          subheader="Customize the appearance and behavior of the interface"
-        />
+      {/* ---- Display ---- */}
+      <Section>
+        <CardHeader avatar={<Monitor />} title="Display" subheader="Appearance of the tutor" />
         <CardContent>
           <Grid container spacing={3}>
             <Grid item xs={12} md={6}>
               <FormControl fullWidth>
                 <InputLabel>Theme</InputLabel>
-                <Select
-                  value={localSettings.displaySettings.theme}
-                  label="Theme"
-                  onChange={(e) => handleSettingChange('displaySettings', 'theme', e.target.value)}
-                >
+                <Select value={draft.displaySettings.theme} label="Theme" onChange={(e) => setField('displaySettings', { theme: e.target.value as UserSettings['displaySettings']['theme'] })}>
                   <MenuItem value="light">Light</MenuItem>
                   <MenuItem value="dark">Dark</MenuItem>
-                  <MenuItem value="auto">Auto (System)</MenuItem>
+                  <MenuItem value="auto">Follow system</MenuItem>
                 </Select>
               </FormControl>
             </Grid>
-
             <Grid item xs={12} md={6}>
-              <Typography gutterBottom>Font Size</Typography>
-              <Slider
-                value={localSettings.displaySettings.fontSize}
-                onChange={(_, value) => handleSettingChange('displaySettings', 'fontSize', value as number)}
-                valueLabelDisplay="auto"
-                min={10}
-                max={20}
-              />
-              <Typography variant="caption" color="text.secondary">
-                Current: {localSettings.displaySettings.fontSize}px
-              </Typography>
+              <Typography gutterBottom>Base font size: {draft.displaySettings.fontSize}px</Typography>
+              <Slider value={draft.displaySettings.fontSize} min={11} max={20} onChange={(_, v) => setField('displaySettings', { fontSize: v as number })} valueLabelDisplay="auto" />
             </Grid>
-
-            <Grid item xs={12} md={6}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={localSettings.displaySettings.showStepByStep}
-                    onChange={(e) => handleSettingChange('displaySettings', 'showStepByStep', e.target.checked)}
-                  />
-                }
-                label="Show Step-by-Step Solutions"
-              />
+            <Grid item xs={12} md={4}>
+              <FormControlLabel control={<Switch checked={draft.displaySettings.showStepByStep} onChange={(e) => setField('displaySettings', { showStepByStep: e.target.checked })} />} label="Show step-by-step working" />
             </Grid>
-
-            <Grid item xs={12} md={6}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={localSettings.displaySettings.showConfidence}
-                    onChange={(e) => handleSettingChange('displaySettings', 'showConfidence', e.target.checked)}
-                  />
-                }
-                label="Show Confidence Scores"
-              />
+            <Grid item xs={12} md={4}>
+              <FormControlLabel control={<Switch checked={draft.displaySettings.showConfidence} onChange={(e) => setField('displaySettings', { showConfidence: e.target.checked })} />} label="Show confidence" />
+            </Grid>
+            <Grid item xs={12} md={4}>
+              <FormControlLabel control={<Switch checked={draft.displaySettings.showModelInfo} onChange={(e) => setField('displaySettings', { showModelInfo: e.target.checked })} />} label="Show engine and timing" />
             </Grid>
           </Grid>
         </CardContent>
-      </SettingsCard>
+      </Section>
 
-      {/* Action Buttons */}
-      <Box sx={{ display: 'flex', gap: 2, justifyContent: 'flex-end', mt: 3 }}>
-        <Button
-          variant="outlined"
-          color="error"
-          onClick={handleResetSettings}
-          disabled={isSaving}
-        >
-          Reset to Default
-        </Button>
-        <Button
-          variant="contained"
-          onClick={handleSaveSettings}
-          disabled={isSaving || !hasChanges}
-          startIcon={isSaving ? <CircularProgress size={20} /> : <Save />}
-        >
-          {isSaving ? 'Saving...' : 'Save Settings'}
-        </Button>
-      </Box>
-
-      {/* System Resources Dialog */}
-      <Dialog
-        open={showResourceDialog}
-        onClose={() => setShowResourceDialog(false)}
-        maxWidth="md"
-        fullWidth
-      >
-        <DialogTitle>System Resources</DialogTitle>
-        <DialogContent>
-          {systemResources ? (
-            <Grid container spacing={3}>
-              <Grid item xs={12} md={6}>
-                <Typography variant="h6" gutterBottom>CPU Information</Typography>
-                <List dense>
-                  <ListItem>
-                    <ListItemText
-                      primary="Usage"
-                      secondary={`${systemResources.cpu.percent_used}%`}
-                    />
-                  </ListItem>
-                  <ListItem>
-                    <ListItemText
-                      primary="Cores"
-                      secondary={`${systemResources.cpu.count} physical, ${systemResources.cpu.count_logical} logical`}
-                    />
-                  </ListItem>
-                </List>
-              </Grid>
-
-              <Grid item xs={12} md={6}>
-                <Typography variant="h6" gutterBottom>Memory Information</Typography>
-                <List dense>
-                  <ListItem>
-                    <ListItemText
-                      primary="Total"
-                      secondary={`${systemResources.memory.total_gb.toFixed(1)} GB`}
-                    />
-                  </ListItem>
-                  <ListItem>
-                    <ListItemText
-                      primary="Available"
-                      secondary={`${systemResources.memory.available_gb.toFixed(1)} GB`}
-                    />
-                  </ListItem>
-                  <ListItem>
-                    <ListItemText
-                      primary="Used"
-                      secondary={`${systemResources.memory.used_gb.toFixed(1)} GB (${systemResources.memory.percent_used}%)`}
-                    />
-                  </ListItem>
-                </List>
-              </Grid>
-
-              <Grid item xs={12} md={6}>
-                <Typography variant="h6" gutterBottom>Disk Information</Typography>
-                <List dense>
-                  <ListItem>
-                    <ListItemText
-                      primary="Total"
-                      secondary={`${systemResources.disk.total_gb.toFixed(1)} GB`}
-                    />
-                  </ListItem>
-                  <ListItem>
-                    <ListItemText
-                      primary="Free"
-                      secondary={`${systemResources.disk.free_gb.toFixed(1)} GB`}
-                    />
-                  </ListItem>
-                  <ListItem>
-                    <ListItemText
-                      primary="Used"
-                      secondary={`${systemResources.disk.used_gb.toFixed(1)} GB (${systemResources.disk.percent_used}%)`}
-                    />
-                  </ListItem>
-                </List>
-              </Grid>
-
-              {systemResources.gpu && systemResources.gpu.length > 0 && (
-                <Grid item xs={12} md={6}>
-                  <Typography variant="h6" gutterBottom>GPU Information</Typography>
-                  {systemResources.gpu.map((gpu, index) => (
-                    <List dense key={index}>
-                      <ListItem>
-                        <ListItemText
-                          primary={`GPU ${gpu.device_id}`}
-                          secondary={gpu.name}
-                        />
-                      </ListItem>
-                      <ListItem>
-                        <ListItemText
-                          primary="Memory"
-                          secondary={`${gpu.memory_allocated_gb.toFixed(1)} GB / ${gpu.memory_total_gb.toFixed(1)} GB`}
-                        />
-                      </ListItem>
-                    </List>
+      {/* ---- Audio ---- */}
+      <Section>
+        <CardHeader avatar={<VolumeUp />} title="Audio" subheader="Voice input and spoken answers (require the speech models below)" />
+        <CardContent>
+          <Grid container spacing={3}>
+            <Grid item xs={12} md={6}>
+              <FormControl fullWidth>
+                <InputLabel>Microphone</InputLabel>
+                <Select value={draft.audioSettings.inputDevice} label="Microphone" onChange={(e) => setField('audioSettings', { inputDevice: e.target.value })}>
+                  <MenuItem value="default">System default</MenuItem>
+                  {devices.inputs.map((d) => (
+                    <MenuItem key={d.deviceId} value={d.deviceId}>{d.label || `Microphone ${d.deviceId.slice(0, 6)}`}</MenuItem>
                   ))}
-                </Grid>
-              )}
+                </Select>
+              </FormControl>
             </Grid>
-          ) : (
-            <Typography>Loading system resources...</Typography>
+            <Grid item xs={12} md={6}>
+              <FormControl fullWidth>
+                <InputLabel>Speaker</InputLabel>
+                <Select value={draft.audioSettings.outputDevice} label="Speaker" onChange={(e) => setField('audioSettings', { outputDevice: e.target.value })}>
+                  <MenuItem value="default">System default</MenuItem>
+                  {devices.outputs.map((d) => (
+                    <MenuItem key={d.deviceId} value={d.deviceId}>{d.label || `Speaker ${d.deviceId.slice(0, 6)}`}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12} md={6}>
+              <Typography gutterBottom>Playback volume: {Math.round(draft.audioSettings.volume * 100)}%</Typography>
+              <Slider value={Math.round(draft.audioSettings.volume * 100)} min={0} max={100} onChange={(_, v) => setField('audioSettings', { volume: (v as number) / 100 })} valueLabelDisplay="auto" />
+            </Grid>
+            <Grid item xs={12} md={6}>
+              <FormControl fullWidth>
+                <InputLabel>Speech language</InputLabel>
+                <Select value={draft.audioSettings.sttLanguage} label="Speech language" onChange={(e) => setField('audioSettings', { sttLanguage: e.target.value, ttsLanguage: e.target.value })}>
+                  {['en', 'zh', 'ms', 'ta', 'id', 'th', 'vi'].map((code) => (
+                    <MenuItem key={code} value={code}>{code}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12} md={6}>
+              <FormControlLabel control={<Switch checked={draft.audioSettings.enableTextToSpeech} onChange={(e) => setField('audioSettings', { enableTextToSpeech: e.target.checked })} />} label="Read solutions aloud" />
+            </Grid>
+          </Grid>
+        </CardContent>
+      </Section>
+
+      {/* ---- Models ---- */}
+      <Section>
+        <CardHeader
+          avatar={<Memory />}
+          title="AI models"
+          subheader="The symbolic engine is always on. Optional local models add handwriting recognition, word problems and speech."
+          action={
+            <Button size="small" onClick={() => void refresh()} startIcon={<Refresh />}>
+              Refresh
+            </Button>
+          }
+        />
+        <CardContent>
+          {backendError && <Alert severity="error" sx={{ mb: 2 }}>Backend unreachable: {backendError}</Alert>}
+          {mlStackMissing && (
+            <Alert severity="info" sx={{ mb: 2 }}>
+              PyTorch/transformers are not installed in the backend environment, so models cannot be loaded. Install{' '}
+              <code>src/backend/requirements-ml.txt</code> and restart the backend to enable them.
+            </Alert>
           )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setShowResourceDialog(false)}>Close</Button>
-        </DialogActions>
-      </Dialog>
-    </SettingsContainer>
+
+          {resources && (
+            <Grid container spacing={2} sx={{ mb: 2 }}>
+              <Grid item xs={6} md={3}>
+                <Stat icon={<Speed color="primary" />} label="CPU" value={resources.cpu.percent_used == null ? '—' : `${resources.cpu.percent_used}%`} />
+              </Grid>
+              <Grid item xs={6} md={3}>
+                <Stat icon={<Memory color="primary" />} label="RAM free" value={gb(resources.memory.available_gb)} />
+              </Grid>
+              <Grid item xs={6} md={3}>
+                <Stat icon={<Download color="primary" />} label="Disk free (models)" value={gb(resources.disk.free_gb)} />
+              </Grid>
+              <Grid item xs={6} md={3}>
+                <Stat icon={<Monitor color="primary" />} label="GPU" value={resources.gpu.length ? resources.gpu.map((g) => `${g.name} (${gb(g.memory_total_gb)})`).join(', ') : 'None detected'} />
+              </Grid>
+            </Grid>
+          )}
+
+          {autoLoad && (
+            <FormControlLabel
+              sx={{ mb: 2 }}
+              control={<Switch checked={autoLoad.enabled} onChange={(e) => void toggleAutoLoad(e.target.checked)} />}
+              label="Reload previously loaded models when the backend starts"
+            />
+          )}
+
+          {models === null && !backendError && <LinearProgress />}
+
+          <Grid container spacing={2}>
+            {models?.map((model) => {
+              const meta = STATUS_META[model.status] ?? STATUS_META.unavailable;
+              const working = busy[model.name] || model.status === 'loading';
+              const canLoad = model.status === 'available' || model.status === 'error';
+              return (
+                <Grid item xs={12} md={6} key={model.name}>
+                  <Card variant="outlined" sx={{ height: '100%' }}>
+                    <CardHeader
+                      avatar={MODEL_ICON[model.type] ?? <Memory />}
+                      title={model.name}
+                      subheader={model.description}
+                      action={<Chip size="small" color={meta.color} label={meta.label} sx={{ mt: 1 }} />}
+                    />
+                    <CardContent sx={{ pt: 0 }}>
+                      <Typography variant="caption" color="text.secondary" display="block">
+                        {model.model_id} · {gb(model.requirements.file_size_gb)} on disk · needs {gb(model.requirements.memory_required_gb)} RAM
+                        {model.requirements.gpu_required ? ' · GPU required' : ''}
+                      </Typography>
+                      {model.status === 'loaded' && (
+                        <Typography variant="caption" color="text.secondary" display="block">
+                          On {model.device} · {mb(model.memory_usage)}{model.loaded_at ? ` · since ${new Date(model.loaded_at).toLocaleTimeString()}` : ''}
+                        </Typography>
+                      )}
+                      {model.status === 'loading' && (
+                        <Box sx={{ my: 1 }}>
+                          <LinearProgress variant={model.loading_progress > 0 ? 'determinate' : 'indeterminate'} value={model.loading_progress} />
+                        </Box>
+                      )}
+                      {model.status === 'not_downloaded' && (
+                        <Alert severity="info" icon={false} sx={{ my: 1, py: 0 }}>
+                          Not on disk. Run <code>python scripts/setup_models.py --model {model.name}</code>, expected at <code>{model.path}</code>.
+                        </Alert>
+                      )}
+                      {model.error && (
+                        <Alert severity="error" icon={<ErrorOutline fontSize="inherit" />} sx={{ my: 1, py: 0 }}>
+                          {model.error}
+                        </Alert>
+                      )}
+                      <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+                        {model.status === 'loaded' ? (
+                          <Button size="small" variant="outlined" color="error" disabled={working} onClick={() => void unloadModel(model)} startIcon={working ? <CircularProgress size={14} /> : <Delete />}>
+                            Unload
+                          </Button>
+                        ) : (
+                          <Tooltip title={canLoad ? '' : meta.label}>
+                            <span>
+                              <Button size="small" variant="contained" disabled={!canLoad || working} onClick={() => void loadModel(model)} startIcon={working ? <CircularProgress size={14} /> : <CheckCircle />}>
+                                Load
+                              </Button>
+                            </span>
+                          </Tooltip>
+                        )}
+                      </Stack>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              );
+            })}
+          </Grid>
+        </CardContent>
+      </Section>
+
+      {/* ---- Generation ---- */}
+      <Section>
+        <CardHeader avatar={<Memory />} title="Language model generation" subheader="Only used when a reasoning model is loaded" />
+        <CardContent>
+          <Grid container spacing={3}>
+            <Grid item xs={12} md={6}>
+              <Typography gutterBottom>Temperature: {draft.modelSettings.temperature.toFixed(2)}</Typography>
+              <Slider value={draft.modelSettings.temperature} min={0} max={1} step={0.05} onChange={(_, v) => setField('modelSettings', { temperature: v as number })} valueLabelDisplay="auto" />
+            </Grid>
+            <Grid item xs={12} md={6}>
+              <Typography gutterBottom>Max tokens: {draft.modelSettings.maxTokens}</Typography>
+              <Slider value={draft.modelSettings.maxTokens} min={256} max={4096} step={256} onChange={(_, v) => setField('modelSettings', { maxTokens: v as number })} valueLabelDisplay="auto" />
+            </Grid>
+            <Grid item xs={12} md={6}>
+              <FormControlLabel control={<Switch checked={draft.modelSettings.enableThinking} onChange={(e) => setField('modelSettings', { enableThinking: e.target.checked })} />} label="Show the model's thinking process" />
+            </Grid>
+          </Grid>
+        </CardContent>
+      </Section>
+
+      <Snackbar open={Boolean(toast)} autoHideDuration={4000} onClose={() => setToast(null)} message={toast} />
+    </Container>
   );
 };
+
+const Stat: React.FC<{ icon: React.ReactNode; label: string; value: string }> = ({ icon, label, value }) => (
+  <Stack direction="row" spacing={1} alignItems="center">
+    {icon}
+    <Box sx={{ minWidth: 0 }}>
+      <Typography variant="caption" color="text.secondary">
+        {label}
+      </Typography>
+      <Typography variant="body2" noWrap title={value}>
+        {value}
+      </Typography>
+    </Box>
+  </Stack>
+);
