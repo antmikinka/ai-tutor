@@ -36,17 +36,12 @@ import { useSettingsContext } from '../../contexts/SettingsContext';
 
 const drawerWidth = 240;
 
-const Main = styled('main', { shouldForwardProp: (prop) => prop !== 'open' })<{ open?: boolean }>(({ theme, open }) => ({
+const Main = styled('main')(({ theme }) => ({
   flexGrow: 1,
+  minWidth: 0,
   padding: theme.spacing(3),
-  transition: theme.transitions.create('margin', {
-    easing: theme.transitions.easing.sharp,
-    duration: theme.transitions.duration.leavingScreen,
-  }),
-  marginLeft: 0,
-  [theme.breakpoints.up('md')]: {
-    marginLeft: open ? 0 : `-${drawerWidth}px`,
-  },
+  display: 'flex',
+  flexDirection: 'column',
 }));
 
 const menuItems = [
@@ -192,14 +187,21 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         ModalProps={{ keepMounted: true }}
-        sx={{ '& .MuiDrawer-paper': { boxSizing: 'border-box', width: drawerWidth } }}
+        sx={{
+          // The persistent drawer's paper is position:fixed; the outer element must
+          // reserve the same width in the flex row or the content renders underneath it.
+          width: { xs: 0, md: drawerOpen ? drawerWidth : 0 },
+          flexShrink: 0,
+          transition: 'width 0.3s',
+          '& .MuiDrawer-paper': { boxSizing: 'border-box', width: drawerWidth },
+        }}
       >
         {drawer}
       </Drawer>
 
-      <Main open={drawerOpen}>
+      <Main>
         <Toolbar />
-        <Box sx={{ height: 'calc(100vh - 64px - 48px)', overflow: 'auto' }}>{children}</Box>
+        <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>{children}</Box>
       </Main>
     </Box>
   );

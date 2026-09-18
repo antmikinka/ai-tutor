@@ -1,6 +1,6 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { Box, Typography } from '@mui/material';
-import { alpha, useTheme } from '@mui/material/styles';
+import { alpha } from '@mui/material/styles';
 import { fabric } from 'fabric';
 import type { WhiteboardGrid } from '../types/MathTypes';
 
@@ -40,18 +40,31 @@ const CHANGE_DEBOUNCE_MS = 300;
 const BACKGROUND = '#ffffff';
 const GRID_SIZE = 24;
 
-const gridBackground = (grid: WhiteboardGrid, lineColor: string): Record<string, string> => {
+// Guide colours are fixed rather than theme-derived: the whiteboard itself is
+// always white (exports must match what the student sees), so the guides must
+// read against white in both light and dark UI themes.
+const DOT_COLOR = 'rgba(25, 35, 126, 0.35)';
+const LINE_COLOR = 'rgba(25, 35, 126, 0.16)';
+const MAJOR_LINE_COLOR = 'rgba(25, 35, 126, 0.30)';
+
+const gridBackground = (grid: WhiteboardGrid): Record<string, string> => {
   if (grid === 'dots') {
     return {
-      backgroundImage: `radial-gradient(circle, ${lineColor} 1px, transparent 1.2px)`,
+      backgroundImage: `radial-gradient(circle, ${DOT_COLOR} 1.6px, transparent 2.2px)`,
       backgroundSize: `${GRID_SIZE}px ${GRID_SIZE}px`,
       backgroundPosition: `${GRID_SIZE / 2}px ${GRID_SIZE / 2}px`,
     };
   }
   if (grid === 'lines') {
+    const major = GRID_SIZE * 5;
     return {
-      backgroundImage: `linear-gradient(${lineColor} 1px, transparent 1px), linear-gradient(90deg, ${lineColor} 1px, transparent 1px)`,
-      backgroundSize: `${GRID_SIZE}px ${GRID_SIZE}px`,
+      backgroundImage: [
+        `linear-gradient(${MAJOR_LINE_COLOR} 1px, transparent 1px)`,
+        `linear-gradient(90deg, ${MAJOR_LINE_COLOR} 1px, transparent 1px)`,
+        `linear-gradient(${LINE_COLOR} 1px, transparent 1px)`,
+        `linear-gradient(90deg, ${LINE_COLOR} 1px, transparent 1px)`,
+      ].join(', '),
+      backgroundSize: `${major}px ${major}px, ${major}px ${major}px, ${GRID_SIZE}px ${GRID_SIZE}px, ${GRID_SIZE}px ${GRID_SIZE}px`,
     };
   }
   return {};
@@ -68,7 +81,6 @@ const gridBackground = (grid: WhiteboardGrid, lineColor: string): Record<string,
  */
 export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
   ({ tool, color, lineWidth, grid = 'none', emptyHint, onChange, onHistoryChange, onSelectionChange }, ref) => {
-    const theme = useTheme();
     const hostRef = useRef<HTMLDivElement>(null);
     const canvasElRef = useRef<HTMLCanvasElement>(null);
     const fabricRef = useRef<fabric.Canvas | null>(null);
@@ -412,8 +424,6 @@ export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
       canvas.requestRenderAll();
     }, [applyBackground, grid]);
 
-    const gridColor = alpha(theme.palette.text.primary, 0.12);
-
     return (
       <Box
         ref={hostRef}
@@ -425,7 +435,7 @@ export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
           backgroundColor: BACKGROUND,
           touchAction: 'none', // stylus / finger drawing must not scroll the page
           userSelect: 'none',
-          ...gridBackground(grid, gridColor),
+          ...gridBackground(grid),
         }}
       >
         <canvas ref={canvasElRef} />

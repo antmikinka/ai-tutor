@@ -1,6 +1,7 @@
 import base64
 import io
 
+import pytest
 from PIL import Image, ImageDraw
 
 
@@ -18,7 +19,32 @@ def test_health(client):
     assert body["status"] == "healthy"
     assert body["services"]["ai_service"] is True
     assert body["services"]["model_service"] is True
+    assert body["services"]["knowledge_service"] is True
+    assert body["services"]["practice_service"] is True
     assert body["timestamp"].endswith("+00:00")
+
+
+@pytest.mark.parametrize(
+    "origin,allowed",
+    [
+        ("http://localhost:3000", True),
+        ("http://localhost:3005", True),  # any loopback port (preview builds, alt dev ports)
+        ("http://127.0.0.1:5173", True),
+        ("null", True),  # packaged Electron renderer (file://)
+        ("http://evil.example.com", False),
+        ("http://localhost.evil.example.com", False),
+    ],
+)
+def test_cors_origins(client, origin, allowed):
+    response = client.options(
+        "/api/practice/status",
+        headers={"Origin": origin, "Access-Control-Request-Method": "GET"},
+    )
+    if allowed:
+        assert response.status_code == 200
+        assert response.headers.get("access-control-allow-origin") == origin
+    else:
+        assert "access-control-allow-origin" not in response.headers
 
 
 def test_root(client):

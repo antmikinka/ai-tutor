@@ -46,6 +46,9 @@ class Settings(BaseSettings):
         # packaged Electron renderer).
         "null",
     ]
+    # The backend only listens on loopback, so any local page (CRA dev server on
+    # another port, a static preview build, ...) is an acceptable origin.
+    cors_origin_regex: Optional[str] = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
 
     # Database Settings
     database_url: str = "sqlite:///./math_tutor.db"
