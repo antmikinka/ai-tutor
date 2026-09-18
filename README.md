@@ -59,6 +59,7 @@ FastAPI backend (src/backend/main.py)
   ├─ /api/audio/*         speech-to-text / text-to-speech (report unavailable without models)
   ├─ /api/knowledge/*     status, documents (text/upload/list/delete), search
   ├─ /api/practice/*      status, generate, problem, check, hint, solution
+  ├─ /api/llm/*           language-model source: config, presets, models, test
   ├─ /api/models/*        list, load, unload, status, resources, auto-load config
   ├─ /api/system/*        status, config, logs, metrics
   └─ services/            ServiceContainer singletons: AI (math engine + local/remote LLM),
@@ -111,21 +112,38 @@ GPU, insufficient RAM/disk). Models live under `src/backend/models/` in
 development and under the app's user-data folder when packaged (`MODEL_DIR`
 overrides both).
 
-### Remote language model (no GPU needed)
+### Choosing the language model: local, OpenRouter, or any OpenAI-compatible API
 
-Any OpenAI-compatible chat endpoint can stand in for the local Qwen model for
-word problems and Practice generation:
+Free-form word problems and LLM-written practice problems can come from the
+local Qwen model **or** from an API. Pick the source in the app:
+
+- **Settings → Language model**: choose *Auto* (local model when loaded,
+  otherwise the API), *Local model* (nothing leaves the machine) or *API*.
+  Pick a provider preset — **OpenRouter**, OpenAI, Ollama, LM Studio or a
+  custom URL — paste the key, pick a model from the live model list (OpenRouter
+  models show context size, price and a "good at math" flag), *Test
+  connection*, then *Save & use*. The choice applies immediately to every open
+  window and is persisted in `<DATA_DIR>/llm_config.json` (key stored locally,
+  file mode 0600, never returned by the API).
+- **Quick settings** (title bar): a one-click *Auto / Local / API* toggle.
+
+Environment defaults (used until you change something in the app; `.env` in
+`src/backend`):
 
 ```bash
-# src/backend/.env
-LLM_API_BASE_URL=https://api.openai.com/v1      # or http://localhost:11434/v1 for Ollama, LM Studio, vLLM ...
-LLM_API_KEY=sk-...                              # omit for local servers that do not need one
-LLM_API_MODEL=gpt-4o-mini
+OPENROUTER_API_KEY=sk-or-v1-...                 # shortest path: selects the OpenRouter preset
+LLM_API_MODEL=openai/gpt-4o-mini                # any model id from https://openrouter.ai/models
+
+# or any OpenAI-compatible endpoint
+LLM_API_BASE_URL=http://localhost:11434/v1      # Ollama; LM Studio is :1234; OpenAI is https://api.openai.com/v1
+LLM_API_KEY=...                                 # omit for local servers that do not need one
+LLM_MODE=auto                                   # auto | local | remote
 ```
 
-Answers produced by the remote model are cross-checked with the SymPy engine
-whenever they contain an equation; Practice problems are rejected and
-regenerated if the engine cannot reproduce the model's answer.
+REST: `GET/PUT/DELETE /api/llm/config`, `GET|POST /api/llm/models`,
+`POST /api/llm/test`. Answers produced by any language model are cross-checked
+with the SymPy engine whenever they contain an equation; Practice problems are
+rejected and regenerated if the engine cannot reproduce the model's answer.
 
 ## Configuration
 
@@ -140,7 +158,9 @@ Backend settings come from environment variables or `src/backend/.env`
 | `MODEL_DIR`, `DATA_DIR`, `LOG_DIR` | under `src/backend/` | Storage locations |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
 | `MAX_WEBSOCKET_MESSAGE_BYTES` | 8 MiB | Upper bound for one WebSocket frame (drawings) |
-| `LLM_API_BASE_URL`, `LLM_API_KEY`, `LLM_API_MODEL`, `LLM_API_TIMEOUT_SECONDS` | unset / `gpt-4o-mini` / `60` | Optional OpenAI-compatible endpoint (see above) |
+| `LLM_MODE` | `auto` | `auto` (local when loaded, else API), `local`, `remote`; overridable in the app |
+| `OPENROUTER_API_KEY` | unset | Selects the OpenRouter preset with this key |
+| `LLM_API_BASE_URL`, `LLM_API_KEY`, `LLM_API_MODEL`, `LLM_API_TIMEOUT_SECONDS` | unset / `gpt-4o-mini` / `60` | Any OpenAI-compatible endpoint (see above) |
 | `KNOWLEDGE_DIR` | `<DATA_DIR>/knowledge` | Chroma store and document registry |
 | `KNOWLEDGE_EMBEDDING` | `auto` | `minilm` (Chroma's ONNX all-MiniLM-L6-v2), `hashing` (offline, no download), or `auto` = MiniLM if available |
 | `KNOWLEDGE_CHUNK_CHARS` / `KNOWLEDGE_CHUNK_OVERLAP_CHARS` | `900` / `150` | Chunking of ingested text |
@@ -154,7 +174,7 @@ time with the port it manages). User preferences are stored via
 
 ```bash
 npm test                 # backend pytest + renderer tests
-npm run test:backend     # 115 tests: math engine, knowledge base, practice, LLM client, REST API, WebSocket protocol
+npm run test:backend     # 123 tests: math engine, knowledge base, practice, LLM client, REST API, WebSocket protocol
 npm run typecheck        # tsc --noEmit for the renderer
 npm run lint
 ```
@@ -189,11 +209,12 @@ src/renderer/              CRA + TypeScript renderer
 src/backend/
   main.py                  app factory, lifespan, WebSocket protocol
   api/dependencies.py      ServiceContainer (single instance of each service)
-  api/routes/              math, drawing, audio, knowledge, practice, system, model routers
+  api/routes/              math, drawing, audio, knowledge, practice, llm, system, model routers
   services/math_engine.py  SymPy solver, parser sandbox, steps, verification
   services/knowledge_service.py  chunking, embedders, Chroma / local vector store, ingestion, search
   services/practice_service.py   RAG word-problem generation, engine validation, templates, grading
-  services/llm_client.py   OpenAI-compatible chat client
+  services/llm_client.py   OpenAI-compatible chat client (OpenRouter/OpenAI/Ollama/LM Studio presets, model listing)
+  services/llm_config.py   persisted runtime choice of local / API / auto
   services/                AI / audio / drawing / model services, optional_deps
   tests/                   pytest suite
   requirements*.txt        core / ml / dev dependency sets
@@ -202,7 +223,8 @@ src/backend/
 ## WebSocket protocol (summary)
 
 Connect to `ws://127.0.0.1:8000/ws/{client_id}`. The server first sends
-`{"type":"connected", "capabilities": {symbolic_solver, llm, llm_name, speech, drawing_recognition, knowledge_base, practice}}`.
+`{"type":"connected", "capabilities": {symbolic_solver, llm, llm_name, llm_mode, speech, drawing_recognition, knowledge_base, practice}}`
+and pushes `{"type":"capabilities", ...}` whenever they change (e.g. the language model source is switched).
 Client messages are JSON with a `type` and optional `request_id`, which the
 server echoes on the reply:
 
@@ -227,7 +249,10 @@ closing the connection. Full types: `src/renderer/src/types/protocol.ts`.
   (any `http://localhost:<port>` / `http://127.0.0.1:<port>`) and the packaged
   `file://` origin.
 - Uploaded course material stays on disk locally; only the retrieved chunks
-  are sent to a language model, and only if you configure a remote one.
+  are sent to a language model, and only when an API provider is the active
+  source. In *Local* mode nothing leaves the machine. API keys are stored in
+  `<DATA_DIR>/llm_config.json` (mode 0600) and only ever sent to the configured
+  base URL.
 - The math parser is sandboxed: whitelisted functions/symbols, no attribute
   access, no builtins, size limits, and CPU-bound work runs with a timeout.
 

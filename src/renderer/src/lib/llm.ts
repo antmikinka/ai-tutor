@@ -31,7 +31,8 @@ export const formatPricePerMillion = (perToken: number | null | undefined): stri
   if (perToken == null) return null;
   if (perToken === 0) return 'free';
   const perMillion = perToken * 1_000_000;
-  return perMillion >= 1 ? `$${perMillion.toFixed(2)}/M` : `$${perMillion.toFixed(3)}/M`;
+  const digits = perMillion >= 1 ? 2 : 3;
+  return `$${parseFloat(perMillion.toFixed(digits))}/M`;
 };
 
 export const formatContext = (tokens: number | null | undefined): string | null => {

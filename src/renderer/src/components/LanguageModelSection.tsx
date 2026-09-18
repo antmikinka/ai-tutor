@@ -305,6 +305,7 @@ export const LanguageModelSection: React.FC<{ onToast: (message: string) => void
                       if (e.target.value) setClearKey(false);
                     }}
                     autoComplete="off"
+                    InputLabelProps={{ shrink: true }}
                     placeholder={clearKey ? 'Key will be removed on save' : config.remote.has_api_key ? `Saved: ${config.remote.api_key_hint} (type to replace)` : preset?.needs_key ? 'Required for this provider' : 'Optional'}
                     error={keyNeeded && config.mode !== 'local'}
                     InputProps={{

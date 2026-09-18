@@ -139,7 +139,17 @@ export const MathTutorPage: React.FC = () => {
         setIsProcessing(false);
       }
     },
-    [connectionStatus, push, pushError, request, settings.audioSettings.enableTextToSpeech],
+    [
+      connectionStatus,
+      push,
+      pushError,
+      request,
+      settings.audioSettings.enableTextToSpeech,
+      settings.displaySettings.showStepByStep,
+      settings.modelSettings.enableThinking,
+      settings.modelSettings.temperature,
+      settings.modelSettings.maxTokens,
+    ],
   );
 
   const verify = useCallback(

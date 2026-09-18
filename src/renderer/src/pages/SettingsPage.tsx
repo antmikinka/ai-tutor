@@ -28,6 +28,7 @@ import { useNavigate } from 'react-router-dom';
 import { useSettingsContext } from '../contexts/SettingsContext';
 import { LanguageModelSection } from '../components/LanguageModelSection';
 import { ApiError, apiFetch } from '../lib/backend';
+import { describeLLMName } from '../lib/llm';
 import type { BackendModel, BackendModelStatus, KnowledgeStatus, PracticeStatus, SystemResources, UserSettings } from '../types/MathTypes';
 
 const Container = styled(Box)(({ theme }) => ({
@@ -326,7 +327,7 @@ export const SettingsPage: React.FC = () => {
                           : `Course material unavailable${learning.knowledge.error ? `: ${learning.knowledge.error}` : ''}`
                       }
                     />
-                    <Chip size="small" color={learning.practice.llm_available ? 'success' : 'default'} label={learning.practice.llm_available ? `Problem writer: ${learning.practice.llm}` : 'Problem writer: verified templates'} />
+                    <Chip size="small" color={learning.practice.llm_available ? 'success' : 'default'} label={learning.practice.llm_available ? `Problem writer: ${describeLLMName(learning.practice.llm)}` : 'Problem writer: verified templates'} />
                   </>
                 ) : (
                   <Chip size="small" label="Backend unreachable" />
