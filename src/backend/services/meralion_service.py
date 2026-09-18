@@ -10,11 +10,14 @@ import io
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 import asyncio
-import torch
 import numpy as np
-import soundfile as sf
-from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
-import librosa
+
+from services.optional_deps import torch, transformers, soundfile as sf, librosa, cuda_available
+
+if transformers is not None:
+    from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
+else:  # pragma: no cover
+    AutoProcessor = AutoModelForSpeechSeq2Seq = None
 
 from config.settings import get_settings
 from services.model_config import ModelConfig, ModelType
@@ -66,7 +69,7 @@ class MERaLiONService:
             self.model.eval()
 
             # Move to appropriate device
-            if self.settings.ai_use_gpu and torch.cuda.is_available():
+            if self.settings.ai_use_gpu and cuda_available():
                 self.model.cuda()
                 logger.info("MERaLiON model moved to GPU")
             else:
@@ -598,7 +601,7 @@ class MERaLiONService:
             )
 
             # Move to appropriate device
-            if self.settings.ai_use_gpu and torch.cuda.is_available():
+            if self.settings.ai_use_gpu and cuda_available():
                 inputs = {k: v.cuda() for k, v in inputs.items()}
 
             # Generate transcription
@@ -971,7 +974,7 @@ class MERaLiONService:
             logger.info("Cleaning up MERaLiON Service...")
 
             # Move model to CPU and clear memory
-            if self.model and torch.cuda.is_available():
+            if self.model and cuda_available():
                 self.model.cpu()
                 torch.cuda.empty_cache()
 

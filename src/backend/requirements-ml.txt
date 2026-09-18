@@ -1,0 +1,17 @@
+# Optional ML stack for local AI models. Large downloads; a CUDA GPU is
+# strongly recommended for the reasoning model.
+#
+#   pip install -r requirements.txt -r requirements-ml.txt
+#
+# Pick the torch build matching your CUDA version from https://pytorch.org
+# if the default wheel is not suitable.
+
+torch>=2.2
+transformers>=4.40
+accelerate>=0.30
+safetensors>=0.4
+huggingface_hub>=0.23
+
+# Audio (MERaLiON speech-to-text, VibeVoice text-to-speech)
+soundfile>=0.12
+librosa>=0.10

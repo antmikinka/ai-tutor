@@ -9,11 +9,15 @@ import time
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 import asyncio
-import torch
 import numpy as np
-from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 import sympy as sp
-from sympy.parsing.latex import parse_latex
+
+from services.optional_deps import torch, transformers, cuda_available
+
+if transformers is not None:
+    from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
+else:  # pragma: no cover - exercised only without the ML stack
+    AutoTokenizer = AutoModelForCausalLM = GenerationConfig = None
 
 from config.settings import get_settings
 from services.model_config import ModelConfig, ModelType
@@ -346,7 +350,7 @@ Provide a clear, step-by-step solution:"""
             inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
 
             # Move to appropriate device
-            if self.settings.ai_use_gpu and torch.cuda.is_available():
+            if self.settings.ai_use_gpu and cuda_available():
                 inputs = {k: v.cuda() for k, v in inputs.items()}
                 self.model.cuda()
 
@@ -731,7 +735,7 @@ Practice Problems:"""
             logger.info("Cleaning up Qwen3-Omni Service...")
 
             # Move model to CPU and clear memory
-            if self.model and torch.cuda.is_available():
+            if self.model and cuda_available():
                 self.model.cpu()
                 torch.cuda.empty_cache()
 

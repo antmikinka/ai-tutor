@@ -1,336 +1,363 @@
 """
 AI Math Tutor Backend Server
-FastAPI application with WebSocket support for real-time communication
+FastAPI application with WebSocket support for real-time communication.
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import os
+import logging.handlers
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Dict, List, Any, Optional
-import uuid
-from datetime import datetime
+from typing import Any, Dict, Literal, Optional, Union
 
-import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-import numpy as np
+from fastapi.middleware.gzip import GZipMiddleware
+from pydantic import BaseModel, Field, ValidationError
 
-# Add the backend directory to Python path
-sys.path.append(str(Path(__file__).parent))
+# Allow ``python main.py`` from any working directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from config.settings import Settings, get_settings
-from api.routes import math_api, audio_api, drawing_api, system_api
-from api.websocket_manager import WebSocketManager
-from services.ai_service import AIService
-from services.audio_service import AudioService
-from services.drawing_service import DrawingService
-from services.model_service import ModelService
+from config.settings import Settings, get_settings  # noqa: E402
+from api.dependencies import ServiceContainer, get_container, set_container  # noqa: E402
+from api.routes import audio_api, drawing_api, math_api, model_api, system_api  # noqa: E402
+from services.common import utc_now_iso  # noqa: E402
+from services.drawing_service import DrawingDecodeError  # noqa: E402
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('backend.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("backend")
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="AI Math Tutor Backend",
-    description="Backend API for AI Math Tutor desktop application",
-    version="1.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc"
-)
 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict to specific origins
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --------------------------------------------------------------------------- #
+# Logging
+# --------------------------------------------------------------------------- #
 
-# Initialize settings
-settings = get_settings()
 
-# Initialize services
-ai_service = AIService(settings)
-audio_service = AudioService(settings)
-drawing_service = DrawingService(settings)
-model_service = ModelService(settings)
+def configure_logging(settings: Settings) -> None:
+    root = logging.getLogger()
+    if getattr(root, "_math_tutor_configured", False):
+        return
+    root.setLevel(settings.log_level.upper())
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-# Initialize WebSocket manager
-websocket_manager = WebSocketManager()
+    stream = logging.StreamHandler(sys.stdout)
+    stream.setFormatter(fmt)
+    root.addHandler(stream)
 
-# Include API routers
-app.include_router(math_api.router, prefix="/api/math", tags=["Math"])
-app.include_router(audio_api.router, prefix="/api/audio", tags=["Audio"])
-app.include_router(drawing_api.router, prefix="/api/drawing", tags=["Drawing"])
-app.include_router(system_api.router, prefix="/api/system", tags=["System"])
+    try:
+        settings.ensure_directories()
+        file_handler = logging.handlers.RotatingFileHandler(
+            settings.log_path,
+            maxBytes=settings.log_max_bytes,
+            backupCount=settings.log_backup_count,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
+    except OSError as exc:  # read-only install dir etc.
+        logger.warning("File logging disabled: %s", exc)
 
-# Serve static files if in production
-if settings.environment == "production":
-    app.mount("/static", StaticFiles(directory="static"), name="static")
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    root._math_tutor_configured = True  # type: ignore[attr-defined]
 
-# Health check endpoint
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for monitoring"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "version": "1.0.0",
-        "services": {
-            "ai_service": ai_service.is_healthy(),
-            "audio_service": audio_service.is_healthy(),
-            "model_service": model_service.is_healthy(),
+
+# --------------------------------------------------------------------------- #
+# Lifespan
+# --------------------------------------------------------------------------- #
+
+
+async def _background_model_preloading(container: ServiceContainer) -> None:
+    """Optionally warm heavy models after the UI is already usable."""
+    await asyncio.sleep(5)
+    logger.info("Background model preloading started")
+    try:
+        await container.model_service.initialize()
+    except Exception as exc:
+        logger.error("Background model preloading failed: %s", exc)
+    else:
+        logger.info("Background model preloading finished")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings: Settings = app.state.settings
+    container = ServiceContainer.create(settings)
+    set_container(container)
+    app.state.container = container
+
+    logger.info("Starting %s v%s (%s)", settings.app_name, settings.version, settings.environment)
+    await container.start()
+
+    preload_task: Optional[asyncio.Task] = None
+    if settings.preload_models:
+        preload_task = asyncio.create_task(_background_model_preloading(container))
+
+    try:
+        yield
+    finally:
+        logger.info("Shutting down backend")
+        if preload_task is not None and not preload_task.done():
+            preload_task.cancel()
+        await container.stop()
+        set_container(None)
+
+
+# --------------------------------------------------------------------------- #
+# Application factory
+# --------------------------------------------------------------------------- #
+
+
+def create_app(settings: Optional[Settings] = None) -> FastAPI:
+    settings = settings or get_settings()
+    configure_logging(settings)
+
+    app = FastAPI(
+        title=settings.app_name,
+        description="Local backend for the AI Math Tutor desktop application",
+        version=settings.version,
+        docs_url="/api/docs" if not settings.is_production else None,
+        redoc_url="/api/redoc" if not settings.is_production else None,
+        lifespan=lifespan,
+    )
+    app.state.settings = settings
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    app.include_router(math_api.router, prefix="/api/math", tags=["Math"])
+    app.include_router(audio_api.router, prefix="/api/audio", tags=["Audio"])
+    app.include_router(drawing_api.router, prefix="/api/drawing", tags=["Drawing"])
+    app.include_router(system_api.router, prefix="/api/system", tags=["System"])
+    app.include_router(model_api.router, prefix="/api", tags=["Models"])
+
+    _register_core_routes(app)
+    return app
+
+
+def _register_core_routes(app: FastAPI) -> None:
+    @app.get("/health", tags=["System"])
+    async def health_check():
+        container = get_container()
+        return {
+            "status": "healthy",
+            "timestamp": utc_now_iso(),
+            "version": container.settings.version,
+            "services": {
+                "ai_service": container.ai_service.is_healthy(),
+                "audio_service": container.audio_service.is_healthy(),
+                "drawing_service": container.drawing_service.is_healthy(),
+                "model_service": container.model_service.is_healthy(),
+            },
+            "websocket_connections": container.websocket_manager.get_connection_count(),
         }
-    }
 
-# System status endpoint
-@app.get("/api/system/status")
-async def system_status():
-    """Get detailed system status and model loading progress"""
-    return {
-        "status": "running",
-        "timestamp": datetime.utcnow().isoformat(),
-        "services": {
-            "ai_service": {
-                "initialized": ai_service.is_initialized,
-                "healthy": ai_service.is_healthy(),
-                "models_loaded": False,  # Models load on demand
-                "description": "AI reasoning and math problem solving (lazy loading)"
+    @app.get("/", tags=["System"])
+    async def root():
+        settings = get_container().settings
+        return {
+            "name": settings.app_name,
+            "version": settings.version,
+            "docs_url": "/api/docs",
+            "health_check": "/health",
+            "websocket": "/ws/{client_id}",
+        }
+
+    @app.websocket("/ws/{client_id}")
+    async def websocket_endpoint(websocket: WebSocket, client_id: str):
+        await handle_websocket(websocket, client_id)
+
+
+# --------------------------------------------------------------------------- #
+# WebSocket protocol
+# --------------------------------------------------------------------------- #
+
+
+class WSBase(BaseModel):
+    request_id: Optional[str] = None
+
+
+class MathInputMessage(WSBase):
+    type: Literal["math_input"]
+    content: str = Field(min_length=1, max_length=4000)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class VerifyMessage(WSBase):
+    type: Literal["verify"]
+    problem: str = Field(min_length=1, max_length=4000)
+    solution: str = Field(min_length=1, max_length=4000)
+
+
+class DrawingMessage(WSBase):
+    type: Literal["drawing"]
+    # Either a base64 string / data URL, or an object with an ``image`` key.
+    data: Union[str, Dict[str, Any]]
+    analysis_type: str = "equation_recognition"
+
+
+class AudioMessage(WSBase):
+    type: Literal["audio"]
+    data: str = Field(min_length=1)
+    language: str = "en"
+    format: str = "wav"
+
+
+class PingMessage(WSBase):
+    type: Literal["ping"]
+
+
+class InboundMessage(BaseModel):
+    message: Union[MathInputMessage, VerifyMessage, DrawingMessage, AudioMessage, PingMessage] = Field(
+        discriminator="type"
+    )
+
+
+async def handle_websocket(websocket: WebSocket, client_id: str) -> None:
+    container = get_container()
+    manager = container.websocket_manager
+    settings = container.settings
+
+    if len(client_id) > 128:
+        await websocket.close(code=1008, reason="client_id too long")
+        return
+    if not await manager.connect(websocket, client_id):
+        return
+
+    await manager.send_message(
+        client_id,
+        {
+            "type": "connected",
+            "client_id": client_id,
+            "server_version": settings.version,
+            "capabilities": {
+                "symbolic_solver": True,
+                "llm": container.ai_service.llm_ready,
+                "speech": bool(getattr(container.audio_service, "meralion_service", None)),
+                "drawing_recognition": container.ai_service.llm_ready,
             },
-            "audio_service": {
-                "initialized": audio_service.is_initialized,
-                "healthy": audio_service.is_healthy(),
-                "models_loaded": False,  # Models load on demand
-                "description": "Speech recognition and text-to-speech (lazy loading)"
-            },
-            "model_service": {
-                "initialized": model_service.is_initialized,
-                "healthy": model_service.is_healthy(),
-                "description": "Model management and loading"
-            }
+            "timestamp": utc_now_iso(),
         },
-        "ui_ready": True,  # UI is always ready now
-        "models_loading": False,  # Models load in background or on demand
-        "architecture": "lazy_loading",
-        "message": "UI is ready. AI models will load automatically when needed."
-    }
+    )
 
-# Root endpoint
-@app.get("/")
-async def root():
-    """Root endpoint with API information"""
-    return {
-        "name": "AI Math Tutor Backend",
-        "version": "1.0.0",
-        "description": "Backend API for AI Math Tutor desktop application",
-        "docs_url": "/api/docs",
-        "health_check": "/health"
-    }
-
-# WebSocket endpoint
-@app.websocket("/ws/{client_id}")
-async def websocket_endpoint(websocket: WebSocket, client_id: str):
-    """WebSocket endpoint for real-time communication"""
-    await websocket_manager.connect(websocket, client_id)
     try:
         while True:
-            # Receive message from WebSocket
-            data = await websocket.receive_text()
-            message = json.loads(data)
+            raw = await websocket.receive_text()
+            manager.record_received(client_id)
+            if len(raw) > settings.max_websocket_message_bytes:
+                await manager.send_error(client_id, "Message too large", "MESSAGE_TOO_LARGE")
+                continue
+            try:
+                message = InboundMessage(message=json.loads(raw)).message
+            except json.JSONDecodeError:
+                await manager.send_error(client_id, "Message is not valid JSON", "INVALID_JSON")
+                continue
+            except ValidationError as exc:
+                await manager.send_error(client_id, f"Invalid message: {exc.errors()[0].get('msg', 'schema error')}", "INVALID_MESSAGE")
+                continue
 
-            # Handle different message types
-            if message["type"] == "drawing":
-                await handle_drawing_message(websocket, client_id, message)
-            elif message["type"] == "audio":
-                await handle_audio_message(websocket, client_id, message)
-            elif message["type"] == "math_input":
-                await handle_math_message(websocket, client_id, message)
-            elif message["type"] == "ping":
-                await websocket.send_text(json.dumps({"type": "pong"}))
-            else:
-                logger.warning(f"Unknown message type: {message['type']}")
-
+            await _dispatch(container, client_id, message)
     except WebSocketDisconnect:
-        websocket_manager.disconnect(client_id)
-        logger.info(f"Client {client_id} disconnected")
-    except Exception as e:
-        logger.error(f"WebSocket error for client {client_id}: {e}")
-        websocket_manager.disconnect(client_id)
+        logger.info("Client %s disconnected", client_id)
+    except Exception as exc:
+        logger.exception("WebSocket failure for %s: %s", client_id, exc)
+    finally:
+        await manager.disconnect(client_id)
 
-async def handle_drawing_message(websocket: WebSocket, client_id: str, message: Dict[str, Any]):
-    """Handle drawing data from canvas"""
+
+async def _dispatch(container: ServiceContainer, client_id: str, message: WSBase) -> None:
+    manager = container.websocket_manager
+    request_id = message.request_id
     try:
-        # Process drawing data
-        processed_data = await drawing_service.process_drawing(message["data"])
+        if isinstance(message, PingMessage):
+            await manager.send_message(client_id, {"type": "pong", "request_id": request_id, "timestamp": utc_now_iso()})
 
-        # Analyze drawing for mathematical content
-        analysis = await ai_service.analyze_drawing(processed_data)
+        elif isinstance(message, MathInputMessage):
+            solution = await container.ai_service.solve_math_problem(message.content, message.metadata)
+            await manager.send_message(
+                client_id,
+                {"type": "math_solution", "solution": solution, "request_id": request_id, "timestamp": utc_now_iso()},
+            )
+            if message.metadata.get("enable_tts", False) and solution.get("confidence", 0) > 0:
+                audio = await container.audio_service.text_to_speech(solution["solution"])
+                if audio.get("available"):
+                    await manager.send_message(
+                        client_id,
+                        {"type": "audio_response", "data": audio, "request_id": request_id, "timestamp": utc_now_iso()},
+                    )
 
-        # Send analysis result back to client
-        response = {
-            "type": "drawing_analysis",
-            "data": analysis,
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        elif isinstance(message, VerifyMessage):
+            verdict = await container.ai_service.verify_solution(message.problem, message.solution)
+            await manager.send_message(
+                client_id,
+                {"type": "verification", "data": verdict, "request_id": request_id, "timestamp": utc_now_iso()},
+            )
 
-        await websocket.send_text(json.dumps(response))
+        elif isinstance(message, DrawingMessage):
+            image = message.data if isinstance(message.data, str) else message.data.get("image") or message.data.get("data")
+            if not isinstance(image, str):
+                await manager.send_error(client_id, "Drawing message needs an 'image' string", "INVALID_MESSAGE", request_id)
+                return
+            processed = await container.drawing_service.process_drawing(image, message.analysis_type)
+            analysis = await container.ai_service.analyze_drawing(image)
+            analysis["image_analysis"] = processed["data"]["image_analysis"]
+            await manager.send_message(
+                client_id,
+                {"type": "drawing_analysis", "data": analysis, "request_id": request_id, "timestamp": utc_now_iso()},
+            )
 
-    except Exception as e:
-        logger.error(f"Error processing drawing: {e}")
-        await websocket.send_text(json.dumps({
-            "type": "error",
-            "message": "Failed to process drawing",
-            "timestamp": datetime.utcnow().isoformat()
-        }))
+        elif isinstance(message, AudioMessage):
+            import base64
 
-async def handle_audio_message(websocket: WebSocket, client_id: str, message: Dict[str, Any]):
-    """Handle audio data for speech recognition"""
-    try:
-        # Process audio data
-        audio_data = message["data"]
-        text = await audio_service.speech_to_text(audio_data)
+            try:
+                audio_bytes = base64.b64decode(message.data, validate=False)
+            except Exception:
+                await manager.send_error(client_id, "Audio data is not valid base64", "INVALID_MESSAGE", request_id)
+                return
+            result = await container.audio_service.speech_to_text(audio_bytes, language=message.language)
+            await manager.send_message(
+                client_id,
+                {
+                    "type": "audio_transcription",
+                    "text": result.get("text", ""),
+                    "confidence": result.get("confidence", 0.0),
+                    "available": result.get("available", False),
+                    "message": result.get("message"),
+                    "request_id": request_id,
+                    "timestamp": utc_now_iso(),
+                },
+            )
+    except DrawingDecodeError as exc:
+        await manager.send_error(client_id, str(exc), "INVALID_IMAGE", request_id)
+    except ValueError as exc:
+        await manager.send_error(client_id, str(exc), "BAD_REQUEST", request_id)
+    except Exception as exc:
+        logger.exception("Error handling %s from %s", type(message).__name__, client_id)
+        await manager.send_error(client_id, f"Internal error: {exc}", "INTERNAL_ERROR", request_id)
 
-        # Send transcription result back to client
-        response = {
-            "type": "audio_transcription",
-            "text": text,
-            "confidence": message.get("confidence", 0.0),
-            "timestamp": datetime.utcnow().isoformat()
-        }
 
-        await websocket.send_text(json.dumps(response))
+app = create_app()
 
-    except Exception as e:
-        logger.error(f"Error processing audio: {e}")
-        await websocket.send_text(json.dumps({
-            "type": "error",
-            "message": "Failed to process audio",
-            "timestamp": datetime.utcnow().isoformat()
-        }))
-
-async def handle_math_message(websocket: WebSocket, client_id: str, message: Dict[str, Any]):
-    """Handle mathematical problem solving"""
-    try:
-        problem = message["content"]
-        metadata = message.get("metadata", {})
-
-        # Get solution from AI service
-        solution = await ai_service.solve_math_problem(problem, metadata)
-
-        # Send solution back to client
-        response = {
-            "type": "math_solution",
-            "solution": solution,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-        await websocket.send_text(json.dumps(response))
-
-        # If text-to-speech is enabled, generate audio response
-        if metadata.get("enable_tts", True):
-            audio_response = await audio_service.text_to_speech(solution["solution"])
-            await websocket.send_text(json.dumps({
-                "type": "audio_response",
-                "data": audio_response,
-                "timestamp": datetime.utcnow().isoformat()
-            }))
-
-    except Exception as e:
-        logger.error(f"Error solving math problem: {e}")
-        await websocket.send_text(json.dumps({
-            "type": "error",
-            "message": "Failed to solve math problem",
-            "timestamp": datetime.utcnow().isoformat()
-        }))
-
-# Startup event - Non-blocking initialization
-@app.on_event("startup")
-async def startup_event():
-    """Initialize basic services without blocking UI"""
-    logger.info("Starting AI Math Tutor Backend...")
-
-    try:
-        # Initialize basic service structures (non-blocking)
-        # Services will load models lazily when needed
-        logger.info("Basic service structures initialized")
-        logger.info("AI Math Tutor Backend started successfully")
-        logger.info("Models will be loaded on-demand when needed")
-
-        # Start background model preloading after a short delay
-        asyncio.create_task(_background_model_preloading())
-
-    except Exception as e:
-        logger.error(f"Failed to initialize basic services: {e}")
-        raise
-
-# Background model preloading
-async def _background_model_preloading():
-    """Preload models in background after UI is ready"""
-    try:
-        # Wait for UI to be ready (5 second delay)
-        await asyncio.sleep(5)
-        logger.info("Starting background model preloading...")
-
-        # Initialize services in background with error handling
-        try:
-            await model_service.initialize()
-            logger.info("Model service initialized (background)")
-        except Exception as e:
-            logger.error(f"Background model service initialization failed: {e}")
-
-        try:
-            await ai_service.initialize()
-            logger.info("AI service initialized (background)")
-        except Exception as e:
-            logger.error(f"Background AI service initialization failed: {e}")
-
-        try:
-            await audio_service.initialize()
-            logger.info("Audio service initialized (background)")
-        except Exception as e:
-            logger.error(f"Background audio service initialization failed: {e}")
-
-        logger.info("Background model preloading completed")
-
-    except Exception as e:
-        logger.error(f"Background model preloading failed: {e}")
-
-    # Shutdown event
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("Shutting down AI Math Tutor Backend...")
-
-    try:
-        await ai_service.cleanup()
-        await audio_service.cleanup()
-        await model_service.cleanup()
-        logger.info("All services cleaned up successfully")
-
-    except Exception as e:
-        logger.error(f"Error during shutdown: {e}")
 
 if __name__ == "__main__":
-    # Run the application
+    import uvicorn
+
+    _settings = get_settings()
     uvicorn.run(
         "main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=settings.debug,
-        log_level="info",
-        ws_ping_interval=20,
-        ws_ping_timeout=10
+        host=_settings.host,
+        port=_settings.port,
+        reload=_settings.debug,
+        log_level=_settings.log_level.lower(),
+        ws_ping_interval=_settings.websocket_ping_interval,
+        ws_ping_timeout=_settings.websocket_ping_timeout,
+        ws_max_size=_settings.max_websocket_message_bytes,
     )

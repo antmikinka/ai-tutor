@@ -1,568 +1,351 @@
 """
-AI Service for mathematical problem solving and reasoning
-Enhanced with Qwen3-Omni-30B-A3B-Thinking integration
+AI Service for mathematical problem solving and reasoning.
+
+The deterministic SymPy engine (``services.math_engine``) is the primary
+solver: it is fast, exact and works without any ML dependencies. The optional
+Qwen3-Omni LLM is only consulted for problems the symbolic engine cannot
+interpret, and only when a real model has actually been loaded.
 """
 
-import json
+from __future__ import annotations
+
+import asyncio
 import logging
 import time
-from typing import Dict, List, Any, Optional
-from datetime import datetime
-import asyncio
 import uuid
-
-import numpy as np
-import sympy as sp
-from sympy.parsing.latex import parse_latex
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional
 
 from config.settings import get_settings
-from services.model_config import ModelType, get_model_registry
-from services.enhanced_model_service import EnhancedModelService
-from services.qwen3_omni_service import Qwen3OmniService
+from services import math_engine
+from services.common import utc_now_iso
+from services.math_engine import MathParseError
+from services.optional_deps import HAS_ML_STACK, ml_stack_status
 
 logger = logging.getLogger(__name__)
 
-class AIService:
-    """
-    AI-powered mathematical problem solving service
-    """
+SYMBOLIC_ENGINE = "sympy"
+LLM_ENGINE_PREFIX = "qwen3-omni"
 
-    def __init__(self, settings=None):
+
+class AIService:
+    """Mathematical problem solving: SymPy first, LLM when available."""
+
+    def __init__(self, settings=None, model_service=None):
         self.settings = settings or get_settings()
-        self.model_service = None
+        self.model_service = model_service
         self.qwen3_service = None
         self.is_initialized = False
-        self.model_registry = get_model_registry()
+        self._history: Deque[Dict[str, Any]] = deque(maxlen=self.settings.solution_history_size)
+        self._stats = {"solved": 0, "failed": 0, "verified": 0, "total_confidence": 0.0}
 
-    async def initialize(self):
-        """Initialize the AI service (lazy loading - models loaded on demand)"""
-        try:
-            logger.info("Initializing Enhanced AI Service...")
+    # ------------------------------------------------------------------ #
+    # Lifecycle
+    # ------------------------------------------------------------------ #
 
-            # Initialize SymPy for symbolic mathematics (lightweight)
-            self._setup_sympy()
+    async def initialize(self) -> None:
+        """Lightweight initialisation; heavy models are loaded on demand."""
+        if HAS_ML_STACK:
+            try:
+                from services.qwen3_omni_service import Qwen3OmniService
 
-            # Create service instances but don't load models yet
-            self.model_service = EnhancedModelService(self.settings)
-            self.qwen3_service = Qwen3OmniService(self.settings)
+                self.qwen3_service = Qwen3OmniService(self.settings)
+            except Exception as exc:
+                logger.warning("Qwen3-Omni wrapper unavailable: %s", exc)
+                self.qwen3_service = None
+        else:
+            logger.info("ML stack not installed; AI service runs with the symbolic engine only")
+        self.is_initialized = True
 
-            # Mark as initialized but models are not loaded yet
-            self.is_initialized = True
-            logger.info("Enhanced AI Service initialized successfully (models will load on demand)")
-
-        except Exception as e:
-            logger.error(f"Failed to initialize AI Service: {e}")
-            raise
-
-    async def cleanup(self):
-        """Clean up resources"""
-        try:
-            logger.info("Cleaning up Enhanced AI Service...")
-
-            # Clean up Qwen3-Omni service
-            if self.qwen3_service:
+    async def cleanup(self) -> None:
+        if self.qwen3_service is not None:
+            try:
                 await self.qwen3_service.cleanup()
-
-            # Clean up model service
-            if self.model_service:
-                await self.model_service.cleanup()
-
-            self.is_initialized = False
-            logger.info("Enhanced AI Service cleaned up successfully")
-
-        except Exception as e:
-            logger.error(f"Error during AI Service cleanup: {e}")
+            except Exception as exc:
+                logger.error("Error cleaning up Qwen3-Omni service: %s", exc)
+        self.is_initialized = False
 
     def is_healthy(self) -> bool:
-        """Check if the AI service is healthy"""
         return self.is_initialized
 
-    async def _ensure_models_loaded(self):
-        """Ensure AI models are loaded (lazy loading)"""
+    @property
+    def llm_ready(self) -> bool:
+        """True only when a real language model is loaded (not 'limited mode')."""
+        svc = self.qwen3_service
+        return bool(svc is not None and svc.is_initialized and getattr(svc, "model", None) is not None)
+
+    async def _attach_loaded_llm(self) -> None:
+        """Bind the Qwen3 wrapper to a reasoning model the user loaded via ModelService."""
+        if self.qwen3_service is None or self.model_service is None or self.llm_ready:
+            return
         try:
-            # Initialize model service if not already initialized
-            if self.model_service and not self.model_service.is_initialized:
-                logger.info("Lazy loading model service...")
-                await self.model_service.initialize()
+            from services.model_config import ModelType
 
-            # Initialize Qwen3-Omni service if not already initialized
-            if self.qwen3_service and not self.qwen3_service.is_initialized:
-                logger.info("Lazy loading Qwen3-Omni model...")
-                await self.qwen3_service.initialize()
-                await self._load_qwen3_model()
-
-        except Exception as e:
-            logger.error(f"Failed to lazy load AI models: {e}")
-            # Don't raise exception - allow fallback methods to work
-
-    async def solve_math_problem(self, problem: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        """
-        Solve a mathematical problem using Qwen3-Omni with enhanced reasoning
-
-        Args:
-            problem: The mathematical problem to solve
-            context: Additional context for solving the problem
-
-        Returns:
-            Dictionary containing solution and metadata
-        """
-        try:
-            start_time = time.time()
-            logger.info(f"Solving math problem with Qwen3-Omni: {problem[:100]}...")
-
-            # Ensure models are loaded (lazy loading)
-            await self._ensure_models_loaded()
-
-            # Use Qwen3-Omni for advanced reasoning
-            if self.qwen3_service and self.qwen3_service.is_initialized:
-                enable_thinking = context.get("enable_thinking", True) if context else True
-                solution = await self.qwen3_service.solve_math_problem(
-                    problem, context, enable_thinking
-                )
-            else:
-                # Fallback to symbolic computation
-                logger.warning("Qwen3-Omni not available, using fallback methods")
-                solution = await self._solve_with_fallback(problem, context)
-
-            processing_time = time.time() - start_time
-
-            return {
-                "solution": solution["solution"],
-                "steps": solution.get("steps", []),
-                "thinking_process": solution.get("thinking_process", []),
-                "confidence": solution.get("confidence", 0.8),
-                "problem_type": solution.get("problem_type", "general"),
-                "processing_time": processing_time,
-                "model_used": "Qwen3-Omni-30B-A3B-Thinking",
-                "tokens_used": solution.get("tokens_used", 0),
-                "verification": solution.get("verification", {}),
-                "timestamp": datetime.utcnow().isoformat()
-            }
-
-        except Exception as e:
-            logger.error(f"Error solving math problem: {e}")
-            # Try fallback method
+            instance = self.model_service.get_loaded_instance(ModelType.REASONING)
+        except Exception as exc:
+            logger.debug("Could not query loaded models: %s", exc)
+            return
+        if instance is not None and instance.model_object is not None:
             try:
-                logger.info("Attempting fallback solution method")
-                fallback_solution = await self._solve_with_fallback(problem, context)
-                return fallback_solution
-            except Exception as fallback_error:
-                logger.error(f"Fallback method also failed: {fallback_error}")
-                raise
+                await self.qwen3_service.initialize(instance.model_object)
+                logger.info("Qwen3-Omni attached to loaded model %s", instance.config.name)
+            except Exception as exc:
+                logger.warning("Failed to attach Qwen3-Omni to loaded model: %s", exc)
+
+    def status(self) -> Dict[str, Any]:
+        return {
+            "initialized": self.is_initialized,
+            "healthy": self.is_healthy(),
+            "symbolic_engine": SYMBOLIC_ENGINE,
+            "llm_ready": self.llm_ready,
+            "llm_model": self.settings.ai_model_name if self.llm_ready else None,
+            "ml_stack": ml_stack_status(),
+            "problems_solved": self._stats["solved"],
+        }
+
+    # ------------------------------------------------------------------ #
+    # Solving
+    # ------------------------------------------------------------------ #
+
+    async def _run_symbolic(self, func, *args):
+        """Run a CPU-bound SymPy call off the event loop with a timeout."""
+        return await asyncio.wait_for(
+            asyncio.to_thread(func, *args),
+            timeout=self.settings.solver_timeout_seconds,
+        )
+
+    async def solve_math_problem(self, problem: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        context = context or {}
+        problem = (problem or "").strip()
+        started = time.perf_counter()
+        if not problem:
+            raise ValueError("Problem text is empty")
+
+        logger.info("Solving: %.100s", problem)
+        try:
+            result = await self._run_symbolic(math_engine.solve, problem)
+            response = self._format_symbolic(result, started, context)
+        except MathParseError as exc:
+            logger.info("Symbolic engine could not interpret problem: %s", exc)
+            await self._attach_loaded_llm()
+            if self.llm_ready:
+                response = await self._solve_with_llm(problem, context, started)
+            else:
+                response = self._unsolved_response(problem, str(exc), started)
+        except asyncio.TimeoutError:
+            response = self._unsolved_response(
+                problem,
+                f"The symbolic solver exceeded {self.settings.solver_timeout_seconds:.0f}s. "
+                "Try simplifying the expression.",
+                started,
+            )
+
+        self._record(response)
+        return response
+
+    def _format_symbolic(self, result: math_engine.MathResult, started: float, context: Dict[str, Any]) -> Dict[str, Any]:
+        steps = list(result.steps) if context.get("enable_step_by_step", True) else []
+        solution_text = result.solution
+        if result.approximation:
+            solution_text = f"{solution_text}  (≈ {result.approximation})"
+        return {
+            "id": str(uuid.uuid4()),
+            "problem": result.problem,
+            "solution": solution_text,
+            "solution_latex": result.solution_latex,
+            "steps": steps,
+            "thinking_process": [],
+            "confidence": result.confidence,
+            "problem_type": result.problem_type,
+            "variable": result.variable,
+            "processing_time": time.perf_counter() - started,
+            "model_used": SYMBOLIC_ENGINE,
+            "tokens_used": 0,
+            "verification": {"is_correct": True, "confidence": result.confidence, "method": "symbolic"},
+            "timestamp": utc_now_iso(),
+        }
+
+    async def _solve_with_llm(self, problem: str, context: Dict[str, Any], started: float) -> Dict[str, Any]:
+        try:
+            llm = await self.qwen3_service.solve_math_problem(
+                problem, context, context.get("enable_thinking", True)
+            )
+        except Exception as exc:
+            logger.error("Qwen3-Omni failed: %s", exc)
+            return self._unsolved_response(problem, f"language model error: {exc}", started)
+        return {
+            "id": str(uuid.uuid4()),
+            "problem": problem,
+            "solution": llm.get("solution", ""),
+            "solution_latex": "",
+            "steps": llm.get("steps", []),
+            "thinking_process": llm.get("thinking_process", []),
+            "confidence": float(llm.get("confidence", 0.6)),
+            "problem_type": llm.get("problem_type", "general"),
+            "variable": None,
+            "processing_time": time.perf_counter() - started,
+            "model_used": f"{LLM_ENGINE_PREFIX}:{self.settings.ai_model_name}",
+            "tokens_used": llm.get("tokens_used", 0),
+            "verification": llm.get("verification", {"is_correct": None, "confidence": 0.0, "method": "llm"}),
+            "timestamp": utc_now_iso(),
+        }
+
+    def _unsolved_response(self, problem: str, reason: str, started: float) -> Dict[str, Any]:
+        hints = [
+            "Write the expression with explicit operators, e.g. 'solve 2x + 3 = 7' or 'derivative of x^2 * sin(x)'.",
+            "Supported commands: solve, simplify, factor, expand, derivative, integrate (optionally 'from a to b'), limit ... as x -> a.",
+        ]
+        if not self.llm_ready:
+            hints.append("Load the Qwen3-Omni model from Settings to get help with word problems and free-form questions.")
+        return {
+            "id": str(uuid.uuid4()),
+            "problem": problem,
+            "solution": "I couldn't interpret that as a math problem I can solve.",
+            "solution_latex": "",
+            "steps": [f"Reason: {reason}"] + hints,
+            "thinking_process": [],
+            "confidence": 0.0,
+            "problem_type": "unknown",
+            "variable": None,
+            "processing_time": time.perf_counter() - started,
+            "model_used": "none",
+            "tokens_used": 0,
+            "verification": {"is_correct": False, "confidence": 0.0, "method": "none"},
+            "timestamp": utc_now_iso(),
+        }
+
+    # ------------------------------------------------------------------ #
+    # Verification
+    # ------------------------------------------------------------------ #
 
     async def verify_solution(self, problem: str, solution: str, verification_type: str = "correctness") -> Dict[str, Any]:
-        """
-        Verify if a mathematical solution is correct
-
-        Args:
-            problem: The original problem
-            solution: The proposed solution
-            verification_type: Type of verification to perform
-
-        Returns:
-            Verification result with confidence and feedback
-        """
         try:
-            logger.info(f"Verifying solution for: {problem}")
-
-            # This is a placeholder implementation
-            # In production, this would use actual verification logic
-
-            # Simulate verification
-            is_correct = np.random.random() > 0.2  # 80% chance of being correct
-            confidence = np.random.uniform(0.7, 0.95)
-
-            feedback = "Solution appears correct" if is_correct else "Solution contains errors"
-            alternative_solutions = []
-
-            if not is_correct:
-                # Generate alternative solution suggestions
-                alternative_solutions = [
-                    "Consider checking your algebraic steps",
-                    "Verify the domain of the function",
-                    "Double-check your arithmetic"
-                ]
-
-            return {
-                "is_correct": is_correct,
-                "confidence": confidence,
-                "feedback": feedback,
-                "alternative_solutions": alternative_solutions,
-                "timestamp": datetime.utcnow().isoformat()
+            verdict = await self._run_symbolic(math_engine.verify, problem, solution)
+        except MathParseError as exc:
+            verdict = {
+                "is_correct": False,
+                "confidence": 0.0,
+                "feedback": f"Could not interpret the problem for verification: {exc}",
+                "expected": None,
+                "expected_steps": [],
+                "alternative_solutions": [],
             }
+        except asyncio.TimeoutError:
+            verdict = {
+                "is_correct": False,
+                "confidence": 0.0,
+                "feedback": "Verification timed out.",
+                "expected": None,
+                "expected_steps": [],
+                "alternative_solutions": [],
+            }
+        self._stats["verified"] += 1
+        verdict["verification_type"] = verification_type
+        verdict["timestamp"] = utc_now_iso()
+        return verdict
 
-        except Exception as e:
-            logger.error(f"Error verifying solution: {e}")
-            raise
+    # ------------------------------------------------------------------ #
+    # Drawing analysis
+    # ------------------------------------------------------------------ #
 
-    async def analyze_drawing(self, drawing_data: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+    async def analyze_drawing(self, drawing_data: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Analyze a drawing for mathematical content using Qwen3-Omni
+        Recognise mathematical content in an image.
 
-        Args:
-            drawing_data: Base64 encoded image data
-            context: Additional context for analysis
-
-        Returns:
-            Analysis result with recognized mathematical content
+        Real recognition requires the multimodal LLM; without it we say so
+        explicitly instead of inventing an equation.
         """
-        try:
-            logger.info("Analyzing drawing for mathematical content")
-
-            # Use Qwen3-Omni for drawing analysis
-            if self.qwen3_service and self.qwen3_service.is_initialized:
-                analysis = await self.qwen3_service.analyze_drawing(drawing_data, context)
-                return {
-                    "recognized_text": analysis.get("analysis", {}).get("recognized_text", ""),
-                    "equations": analysis.get("analysis", {}).get("equations", []),
-                    "shapes": analysis.get("analysis", {}).get("shapes", []),
-                    "concepts": analysis.get("analysis", {}).get("concepts", []),
-                    "confidence": analysis.get("confidence", 0.8),
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-            else:
-                # Fallback to basic analysis
-                logger.warning("Qwen3-Omni not available, using basic drawing analysis")
-                return await self._analyze_drawing_fallback(drawing_data, context)
-
-        except Exception as e:
-            logger.error(f"Error analyzing drawing: {e}")
-            # Try fallback method
+        await self._attach_loaded_llm()
+        if self.llm_ready:
             try:
-                return await self._analyze_drawing_fallback(drawing_data, context)
-            except Exception as fallback_error:
-                logger.error(f"Fallback drawing analysis also failed: {fallback_error}")
-                raise
+                analysis = await self.qwen3_service.analyze_drawing(drawing_data, context)
+                inner = analysis.get("analysis", {})
+                return {
+                    "available": True,
+                    "recognized_text": inner.get("recognized_text", ""),
+                    "equations": inner.get("equations", []),
+                    "shapes": inner.get("shapes", []),
+                    "concepts": inner.get("concepts", []),
+                    "confidence": float(analysis.get("confidence", 0.0)),
+                    "model_used": f"{LLM_ENGINE_PREFIX}:{self.settings.ai_model_name}",
+                    "timestamp": utc_now_iso(),
+                }
+            except Exception as exc:
+                logger.error("Drawing analysis with Qwen3-Omni failed: %s", exc)
+        return {
+            "available": False,
+            "recognized_text": "",
+            "equations": [],
+            "shapes": [],
+            "concepts": [],
+            "confidence": 0.0,
+            "model_used": "none",
+            "message": "Handwriting recognition needs the Qwen3-Omni vision model. Type the expression instead, or load the model from Settings.",
+            "timestamp": utc_now_iso(),
+        }
+
+    # ------------------------------------------------------------------ #
+    # Metadata / history
+    # ------------------------------------------------------------------ #
 
     async def get_supported_problem_types(self) -> List[str]:
-        """
-        Get list of supported mathematical problem types
-
-        Returns:
-            List of supported problem types
-        """
         return [
-            "algebra",
             "equation",
-            "calculus",
-            "geometry",
-            "statistics",
-            "trigonometry",
-            "linear_algebra",
-            "probability",
-            "number_theory",
-            "general"
+            "system",
+            "inequality",
+            "derivative",
+            "integral",
+            "definite_integral",
+            "limit",
+            "simplify",
+            "factor",
+            "expand",
+            "evaluate",
         ]
 
-    def _setup_sympy(self):
-        """Setup SymPy for symbolic mathematics"""
-        try:
-            # Configure SymPy settings
-            sp.init_printing(use_unicode=True)
-            logger.info("SymPy configured successfully")
-        except Exception as e:
-            logger.error(f"Error setting up SymPy: {e}")
-
-    async def _load_ai_model(self):
-        """Load the AI model"""
-        try:
-            # This is a placeholder for loading the actual Qwen model
-            # In production, you would load the model from the specified path
-            logger.info(f"Loading AI model: {self.settings.ai_model_name}")
-
-            # Simulate model loading time
-            await asyncio.sleep(1)
-
-            logger.info("AI model loaded successfully")
-
-        except Exception as e:
-            logger.error(f"Error loading AI model: {e}")
-            raise
-
-    def _analyze_problem_type(self, problem: str) -> str:
-        """
-        Analyze the type of mathematical problem
-
-        Args:
-            problem: The problem text
-
-        Returns:
-            Detected problem type
-        """
-        problem_lower = problem.lower()
-
-        # Simple keyword-based classification
-        if any(keyword in problem_lower for keyword in ["derivative", "integral", "limit", "differentiate", "integrate"]):
-            return "calculus"
-        elif any(keyword in problem_lower for keyword in ["triangle", "circle", "area", "volume", "angle"]):
-            return "geometry"
-        elif any(keyword in problem_lower for keyword in ["mean", "median", "standard deviation", "probability"]):
-            return "statistics"
-        elif any(keyword in problem_lower for keyword in ["solve", "equation", "unknown", "variable"]):
-            return "algebra"
+    def _record(self, response: Dict[str, Any]) -> None:
+        if response["confidence"] > 0:
+            self._stats["solved"] += 1
+            self._stats["total_confidence"] += response["confidence"]
         else:
-            return "general"
-
-    async def _solve_algebra_problem(self, problem: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Solve algebraic problems using SymPy"""
-        try:
-            # Try to parse and solve using SymPy
-            x = sp.symbols('x')
-
-            # Example: Solve simple quadratic equation
-            # This is a placeholder - actual implementation would parse the problem
-            equation = sp.Eq(x**2 + 2*x + 1, 0)
-            solution = sp.solve(equation, x)
-
-            return {
-                "solution": str(solution),
-                "method": "symbolic_algebra",
-                "variables": ["x"]
+            self._stats["failed"] += 1
+        self._history.appendleft(
+            {
+                "id": response["id"],
+                "problem": response["problem"],
+                "solution": response["solution"],
+                "problem_type": response["problem_type"],
+                "confidence": response["confidence"],
+                "model_used": response["model_used"],
+                "timestamp": response["timestamp"],
             }
+        )
 
-        except Exception as e:
-            logger.error(f"Error solving algebra problem: {e}")
-            # Fallback to general solving
-            return await self._solve_general_problem(problem, context)
+    def get_history(self, limit: int = 50, offset: int = 0, problem_type: Optional[str] = None) -> Dict[str, Any]:
+        items = [h for h in self._history if problem_type is None or h["problem_type"] == problem_type]
+        return {"history": items[offset : offset + limit], "total": len(items), "limit": limit, "offset": offset}
 
-    async def _solve_calculus_problem(self, problem: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Solve calculus problems"""
-        try:
-            # Example: Take derivative
-            x = sp.symbols('x')
-            expr = x**2 + 2*x + 1
-            derivative = sp.diff(expr, x)
+    def delete_history_item(self, solution_id: str) -> bool:
+        for item in list(self._history):
+            if item["id"] == solution_id:
+                self._history.remove(item)
+                return True
+        return False
 
-            return {
-                "solution": f"The derivative is: {derivative}",
-                "method": "symbolic_calculus",
-                "operation": "derivative"
-            }
+    def clear_history(self) -> None:
+        self._history.clear()
 
-        except Exception as e:
-            logger.error(f"Error solving calculus problem: {e}")
-            return await self._solve_general_problem(problem, context)
-
-    async def _solve_geometry_problem(self, problem: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Solve geometry problems"""
-        try:
-            # Example: Calculate area of circle
-            return {
-                "solution": "The area of a circle with radius r is πr²",
-                "method": "geometric_formula",
-                "formula": "A = πr²"
-            }
-
-        except Exception as e:
-            logger.error(f"Error solving geometry problem: {e}")
-            return await self._solve_general_problem(problem, context)
-
-    async def _solve_statistics_problem(self, problem: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Solve statistics problems"""
-        try:
-            # Example: Calculate mean
-            return {
-                "solution": "The mean is calculated as the sum of all values divided by the count of values",
-                "method": "statistical_formula",
-                "formula": "μ = Σx / n"
-            }
-
-        except Exception as e:
-            logger.error(f"Error solving statistics problem: {e}")
-            return await self._solve_general_problem(problem, context)
-
-    async def _solve_general_problem(self, problem: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Solve general mathematical problems"""
-        try:
-            # This is where the AI model would be used
-            # For now, provide a general helpful response
-
-            solutions = [
-                f"To solve '{problem}', I recommend breaking it down into smaller steps",
-                f"The problem '{problem}' can be approached by identifying the key mathematical concepts involved",
-                f"For '{problem}', consider using fundamental principles and working systematically"
-            ]
-
-            import random
-            solution = random.choice(solutions)
-
-            return {
-                "solution": solution,
-                "method": "ai_reasoning",
-                "requires_human_verification": True
-            }
-
-        except Exception as e:
-            logger.error(f"Error solving general problem: {e}")
-            return {
-                "solution": "I'm sorry, I couldn't solve this problem. Please try rephrasing it or provide more context.",
-                "method": "error_fallback"
-            }
-
-    async def _generate_steps(self, problem: str, solution: str) -> List[str]:
-        """Generate step-by-step solution"""
-        try:
-            # This is a placeholder implementation
-            # In production, this would use the AI model to generate detailed steps
-
-            steps = [
-                f"Step 1: Understand the problem: {problem}",
-                "Step 2: Identify the mathematical concepts involved",
-                "Step 3: Apply the appropriate formulas and methods",
-                f"Step 4: Verify the solution: {solution}",
-                "Step 5: Check if the solution makes sense in the context"
-            ]
-
-            return steps
-
-        except Exception as e:
-            logger.error(f"Error generating steps: {e}")
-            return ["Unable to generate detailed steps"]
-
-    def _calculate_confidence(self, problem: str, solution: Dict[str, Any]) -> float:
-        """Calculate confidence score for the solution"""
-        try:
-            # This is a placeholder implementation
-            # In production, this would use actual confidence scoring
-
-            base_confidence = 0.8
-            method_bonus = {
-                "symbolic_algebra": 0.1,
-                "symbolic_calculus": 0.1,
-                "geometric_formula": 0.05,
-                "statistical_formula": 0.05,
-                "ai_reasoning": 0.0,
-                "error_fallback": -0.2
-            }
-
-            method = solution.get("method", "ai_reasoning")
-            confidence = base_confidence + method_bonus.get(method, 0.0)
-
-            return max(0.0, min(1.0, confidence))
-
-        except Exception as e:
-            logger.error(f"Error calculating confidence: {e}")
-            return 0.5
-
-    # New helper methods for Qwen3-Omni integration
-    async def _load_qwen3_model(self):
-        """Load Qwen3-Omni model"""
-        try:
-            logger.info("Loading Qwen3-Omni model...")
-
-            # Get model configuration
-            qwen3_config = self.model_registry.get_model("Qwen3-Omni-30B-A3B-Thinking")
-            if not qwen3_config:
-                raise ValueError("Qwen3-Omni model configuration not found")
-
-            # Load model using enhanced model service
-            load_result = await self.model_service.load_model(qwen3_config.name)
-            if load_result["status"] == "loaded":
-                # Initialize Qwen3-Omni service with loaded model
-                model_instance = self.model_service.models.get(qwen3_config.name)
-                if model_instance:
-                    await self.qwen3_service.initialize(model_instance.model_object)
-                    logger.info("Qwen3-Omni model loaded and initialized successfully")
-                else:
-                    logger.warning("Qwen3-Omni model instance not found")
-            else:
-                logger.warning(f"Failed to load Qwen3-Omni model: {load_result.get('status')}")
-
-        except Exception as e:
-            logger.error(f"Error loading Qwen3-Omni model: {e}")
-            # Continue without Qwen3-Omni - will use fallback methods
-            logger.info("Continuing with fallback methods")
-
-    async def _solve_with_fallback(self, problem: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Solve problem using fallback methods"""
-        try:
-            start_time = time.time()
-
-            # Analyze problem type
-            problem_type = self._analyze_problem_type(problem)
-
-            # Solve using appropriate method
-            if problem_type in ["algebra", "equation"]:
-                solution = await self._solve_algebra_problem(problem, context)
-            elif problem_type == "calculus":
-                solution = await self._solve_calculus_problem(problem, context)
-            elif problem_type == "geometry":
-                solution = await self._solve_geometry_problem(problem, context)
-            elif problem_type == "statistics":
-                solution = await self._solve_statistics_problem(problem, context)
-            else:
-                solution = await self._solve_general_problem(problem, context)
-
-            # Generate step-by-step solution if requested
-            if context and context.get("enable_step_by_step", True):
-                steps = await self._generate_steps(problem, solution["solution"])
-                solution["steps"] = steps
-
-            # Calculate confidence
-            confidence = self._calculate_confidence(problem, solution)
-
-            processing_time = time.time() - start_time
-
-            return {
-                "solution": solution["solution"],
-                "steps": solution.get("steps", []),
-                "thinking_process": [],
-                "confidence": confidence,
-                "problem_type": problem_type,
-                "processing_time": processing_time,
-                "model_used": "symbolic_computation_fallback",
-                "tokens_used": 0,
-                "verification": {"is_correct": True, "confidence": confidence},
-                "timestamp": datetime.utcnow().isoformat()
-            }
-
-        except Exception as e:
-            logger.error(f"Error in fallback solution: {e}")
-            return {
-                "solution": f"I apologize, but I encountered an error while solving: {problem}",
-                "steps": ["Please try rephrasing the problem or check if it's correctly formatted."],
-                "thinking_process": [],
-                "confidence": 0.1,
-                "problem_type": "error",
-                "processing_time": 0,
-                "model_used": "error_fallback",
-                "tokens_used": 0,
-                "verification": {"is_correct": False, "confidence": 0.1},
-                "timestamp": datetime.utcnow().isoformat()
-            }
-
-    async def _analyze_drawing_fallback(self, drawing_data: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Fallback drawing analysis"""
-        try:
-            # Basic simulation of drawing analysis
-            recognized_text = "x² + 2x + 1 = 0"
-            confidence = np.random.uniform(0.7, 0.9)
-
-            equations = [
-                {
-                    "equation": "x² + 2x + 1 = 0",
-                    "type": "quadratic",
-                    "variables": ["x"],
-                    "confidence": confidence
-                }
-            ]
-
-            return {
-                "recognized_text": recognized_text,
-                "equations": equations,
-                "shapes": [],
-                "concepts": ["algebra", "quadratic_equation"],
-                "confidence": confidence,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-
-        except Exception as e:
-            logger.error(f"Error in fallback drawing analysis: {e}")
-            return {
-                "recognized_text": "",
-                "equations": [],
-                "shapes": [],
-                "concepts": [],
-                "confidence": 0.0,
-                "timestamp": datetime.utcnow().isoformat()
-            }
+    def get_statistics(self) -> Dict[str, Any]:
+        solved = self._stats["solved"]
+        by_type: Dict[str, int] = {}
+        for item in self._history:
+            by_type[item["problem_type"]] = by_type.get(item["problem_type"], 0) + 1
+        popular = sorted(by_type.items(), key=lambda kv: kv[1], reverse=True)
+        return {
+            "total_problems_solved": solved,
+            "total_failed": self._stats["failed"],
+            "total_verified": self._stats["verified"],
+            "average_confidence": (self._stats["total_confidence"] / solved) if solved else 0.0,
+            "popular_problem_types": [{"type": t, "count": c} for t, c in popular[:5]],
+            "history_size": len(self._history),
+        }

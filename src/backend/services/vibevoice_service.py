@@ -11,10 +11,14 @@ import base64
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 import asyncio
-import torch
 import numpy as np
-import soundfile as sf
-from transformers import AutoProcessor, AutoModelForTextToWaveform
+
+from services.optional_deps import torch, transformers, soundfile as sf, cuda_available
+
+if transformers is not None:
+    from transformers import AutoProcessor, AutoModelForTextToWaveform
+else:  # pragma: no cover
+    AutoProcessor = AutoModelForTextToWaveform = None
 
 from config.settings import get_settings
 from services.model_config import ModelConfig, ModelType
@@ -65,7 +69,7 @@ class VibeVoiceService:
             self.model.eval()
 
             # Move to appropriate device
-            if self.settings.ai_use_gpu and torch.cuda.is_available():
+            if self.settings.ai_use_gpu and cuda_available():
                 self.model.cuda()
                 logger.info("VibeVoice model moved to GPU")
             else:
@@ -551,7 +555,7 @@ class VibeVoiceService:
             )
 
             # Move to appropriate device
-            if self.settings.ai_use_gpu and torch.cuda.is_available():
+            if self.settings.ai_use_gpu and cuda_available():
                 inputs = {k: v.cuda() for k, v in inputs.items()}
 
             # Generate speech
@@ -709,7 +713,7 @@ class VibeVoiceService:
             logger.info("Cleaning up VibeVoice Service...")
 
             # Move model to CPU and clear memory
-            if self.model and torch.cuda.is_available():
+            if self.model and cuda_available():
                 self.model.cpu()
                 torch.cuda.empty_cache()
 
