@@ -20,6 +20,7 @@ from config.settings import get_settings
 from services import math_engine
 from services.common import utc_now_iso
 from services.llm_client import LLMClientError, RemoteLLMClient, extract_json_object
+from services.llm_config import LLMConfigStore, RemoteLLMSettings
 from services.math_engine import MathParseError
 from services.optional_deps import HAS_ML_STACK, ml_stack_status
 
@@ -40,17 +41,85 @@ class AIService:
         self.settings = settings or get_settings()
         self.model_service = model_service
         self.qwen3_service = None
+        self.llm_config = LLMConfigStore(self.settings)
         self.remote_llm: Optional[RemoteLLMClient] = None
-        if self.settings.remote_llm_configured:
-            self.remote_llm = RemoteLLMClient(
-                self.settings.llm_api_base_url,
-                self.settings.llm_api_key,
-                self.settings.llm_api_model,
-                self.settings.llm_api_timeout_seconds,
-            )
+        self._stale_remote_clients: List[RemoteLLMClient] = []
+        self._build_remote_client()
         self.is_initialized = False
         self._history: Deque[Dict[str, Any]] = deque(maxlen=self.settings.solution_history_size)
         self._stats = {"solved": 0, "failed": 0, "verified": 0, "total_confidence": 0.0}
+
+    # ------------------------------------------------------------------ #
+    # Language model selection
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def make_remote_client(remote: RemoteLLMSettings) -> Optional[RemoteLLMClient]:
+        if not remote.configured:
+            return None
+        return RemoteLLMClient(remote.base_url, remote.api_key, remote.model, remote.timeout_seconds, provider=remote.preset)
+
+    def _build_remote_client(self) -> None:
+        if self.remote_llm is not None:
+            # Closed asynchronously later; requests in flight keep their client.
+            self._stale_remote_clients.append(self.remote_llm)
+        self.remote_llm = self.make_remote_client(self.llm_config.config.remote)
+
+    async def apply_llm_config(self, **changes) -> Dict[str, Any]:
+        """Update mode/provider/key/model at runtime, persist, and rebuild the remote client."""
+        self.llm_config.update(**changes)
+        return await self._rebuild_remote_client()
+
+    async def reset_llm_config(self) -> Dict[str, Any]:
+        """Drop the persisted choice and go back to the environment defaults."""
+        self.llm_config.reset()
+        return await self._rebuild_remote_client()
+
+    async def _rebuild_remote_client(self) -> Dict[str, Any]:
+        self._build_remote_client()
+        for client in self._stale_remote_clients:
+            try:
+                await client.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._stale_remote_clients.clear()
+        logger.info("LLM config updated: mode=%s remote=%s", self.llm_mode, self.remote_llm.name if self.remote_llm else None)
+        return self.llm_status()
+
+    @property
+    def llm_mode(self) -> str:
+        return self.llm_config.config.mode
+
+    @property
+    def remote_allowed(self) -> bool:
+        return self.llm_mode in ("auto", "remote") and self.remote_llm is not None
+
+    @property
+    def local_allowed(self) -> bool:
+        return self.llm_mode in ("auto", "local")
+
+    def active_backend(self) -> Optional[str]:
+        """Which language model would answer right now: 'local', 'remote' or None."""
+        if self.local_allowed and self.llm_ready:
+            return "local"
+        if self.remote_allowed:
+            return "remote"
+        return None
+
+    def llm_status(self) -> Dict[str, Any]:
+        active = self.active_backend()
+        local_model = self.settings.ai_model_name
+        return {
+            **self.llm_config.public(),
+            "active": {"backend": active, "name": self.llm_name},
+            "local": {
+                "ready": self.llm_ready,
+                "model": local_model,
+                "ml_stack": HAS_ML_STACK,
+                "allowed": self.local_allowed,
+            },
+            "remote_active": self.remote_allowed,
+        }
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -69,7 +138,7 @@ class AIService:
         else:
             logger.info("ML stack not installed; AI service runs with the symbolic engine only")
         if self.remote_llm is not None:
-            logger.info("Remote LLM endpoint configured: %s (%s)", self.settings.llm_api_base_url, self.remote_llm.model)
+            logger.info("Remote LLM configured: %s (%s), mode=%s", self.remote_llm.base_url, self.remote_llm.model, self.llm_mode)
         self.is_initialized = True
 
     async def cleanup(self) -> None:
@@ -78,8 +147,10 @@ class AIService:
                 await self.qwen3_service.cleanup()
             except Exception as exc:
                 logger.error("Error cleaning up Qwen3-Omni service: %s", exc)
-        if self.remote_llm is not None:
-            await self.remote_llm.close()
+        for client in [self.remote_llm, *self._stale_remote_clients]:
+            if client is not None:
+                await client.close()
+        self._stale_remote_clients.clear()
         self.is_initialized = False
 
     def is_healthy(self) -> bool:
@@ -93,28 +164,39 @@ class AIService:
 
     @property
     def any_llm_available(self) -> bool:
-        return self.llm_ready or self.remote_llm is not None
+        return self.active_backend() is not None
 
     @property
     def llm_name(self) -> Optional[str]:
-        if self.llm_ready:
+        backend = self.active_backend()
+        if backend == "local":
             return f"{LLM_ENGINE_PREFIX}:{self.settings.ai_model_name}"
-        if self.remote_llm is not None:
+        if backend == "remote" and self.remote_llm is not None:
             return self.remote_llm.name
         return None
 
+    def _no_llm_message(self) -> str:
+        mode = self.llm_mode
+        if mode == "local":
+            return "Language model source is set to 'local only' but no local model is loaded. Load Qwen3-Omni from Settings or switch to an API provider."
+        if mode == "remote":
+            return "Language model source is set to 'API' but no provider/model is configured. Add an OpenRouter (or other) API key and model in Settings."
+        return "No language model is available. Load Qwen3-Omni, or configure OpenRouter / another OpenAI-compatible API in Settings."
+
     # ------------------------------------------------------------------ #
-    # Generic text generation (local model first, remote endpoint second)
+    # Generic text generation (routed by the user's LLM mode)
     # ------------------------------------------------------------------ #
 
     async def complete(self, system: str, user: str, *, json_mode: bool = False, max_tokens: int = 1024) -> str:
         """Return raw model text for a prompt, or raise NoLanguageModelError."""
-        await self._attach_loaded_llm()
-        if self.llm_ready:
+        if self.local_allowed:
+            await self._attach_loaded_llm()
+        backend = self.active_backend()
+        if backend == "local":
             prompt = f"{system}\n\n{user}"
             result = await self.qwen3_service._generate_solution(prompt, "generic")  # noqa: SLF001 - shared wrapper API
             return result.get("generated_text", "")
-        if self.remote_llm is not None:
+        if backend == "remote":
             try:
                 return await self.remote_llm.chat(
                     [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -124,7 +206,7 @@ class AIService:
                 )
             except LLMClientError as exc:
                 raise NoLanguageModelError(str(exc)) from exc
-        raise NoLanguageModelError("No language model is available (load Qwen3-Omni or configure LLM_API_BASE_URL).")
+        raise NoLanguageModelError(self._no_llm_message())
 
     async def complete_json(self, system: str, user: str, *, max_tokens: int = 1024) -> Dict[str, Any]:
         text = await self.complete(system, user, json_mode=True, max_tokens=max_tokens)
@@ -158,8 +240,10 @@ class AIService:
             "symbolic_engine": SYMBOLIC_ENGINE,
             "llm_ready": self.llm_ready,
             "llm_model": self.settings.ai_model_name if self.llm_ready else None,
+            "llm_mode": self.llm_mode,
             "remote_llm": self.remote_llm.name if self.remote_llm else None,
             "llm_available": self.any_llm_available,
+            "llm_active": self.llm_name,
             "ml_stack": ml_stack_status(),
             "problems_solved": self._stats["solved"],
         }
@@ -188,10 +272,12 @@ class AIService:
             response = self._format_symbolic(result, started, context)
         except MathParseError as exc:
             logger.info("Symbolic engine could not interpret problem: %s", exc)
-            await self._attach_loaded_llm()
-            if self.llm_ready:
+            if self.local_allowed:
+                await self._attach_loaded_llm()
+            backend = self.active_backend()
+            if backend == "local":
                 response = await self._solve_with_llm(problem, context, started)
-            elif self.remote_llm is not None:
+            elif backend == "remote":
                 response = await self._solve_with_remote_llm(problem, context, started)
             else:
                 response = self._unsolved_response(problem, str(exc), started)
@@ -315,10 +401,7 @@ class AIService:
             "Supported commands: solve, simplify, factor, expand, derivative, integrate (optionally 'from a to b'), limit ... as x -> a.",
         ]
         if not self.any_llm_available:
-            hints.append(
-                "For word problems, load the Qwen3-Omni model from Settings or point LLM_API_BASE_URL at an "
-                "OpenAI-compatible endpoint (OpenAI, Ollama, LM Studio, ...)."
-            )
+            hints.append(f"For word problems: {self._no_llm_message()}")
         return {
             "id": str(uuid.uuid4()),
             "problem": problem,

@@ -17,6 +17,7 @@ from config.settings import Settings, get_settings
 from api.websocket_manager import WebSocketManager
 from services.ai_service import AIService
 from services.audio_service import AudioService
+from services.common import utc_now_iso
 from services.drawing_service import DrawingService
 from services.knowledge_service import KnowledgeService
 from services.model_service import ModelService
@@ -66,6 +67,24 @@ class ServiceContainer:
                 await service.initialize()
             except Exception as exc:  # a broken optional feature must not kill the server
                 logger.error("%s failed to initialize: %s", name, exc)
+
+    def capabilities(self) -> dict:
+        """Feature flags sent to the renderer on connect and whenever they change."""
+        return {
+            "symbolic_solver": True,
+            "llm": self.ai_service.any_llm_available,
+            "llm_name": self.ai_service.llm_name,
+            "llm_mode": self.ai_service.llm_mode,
+            "speech": bool(getattr(self.audio_service, "meralion_service", None)),
+            "drawing_recognition": self.ai_service.llm_ready,
+            "knowledge_base": self.knowledge_service.is_healthy(),
+            "practice": self.practice_service.is_healthy(),
+        }
+
+    async def broadcast_capabilities(self) -> None:
+        await self.websocket_manager.broadcast(
+            {"type": "capabilities", "capabilities": self.capabilities(), "timestamp": utc_now_iso()}
+        )
 
     async def stop(self) -> None:
         await self.websocket_manager.close_all()

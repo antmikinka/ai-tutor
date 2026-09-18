@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config.settings import Settings, get_settings  # noqa: E402
 from api.dependencies import ServiceContainer, get_container, set_container  # noqa: E402
-from api.routes import audio_api, drawing_api, knowledge_api, math_api, model_api, practice_api, system_api  # noqa: E402
+from api.routes import audio_api, drawing_api, knowledge_api, llm_api, math_api, model_api, practice_api, system_api  # noqa: E402
 from services.common import utc_now_iso  # noqa: E402
 from services.drawing_service import DrawingDecodeError  # noqa: E402
 
@@ -141,6 +141,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(model_api.router, prefix="/api", tags=["Models"])
     app.include_router(knowledge_api.router, prefix="/api/knowledge", tags=["Knowledge"])
     app.include_router(practice_api.router, prefix="/api/practice", tags=["Practice"])
+    app.include_router(llm_api.router, prefix="/api/llm", tags=["Language model"])
 
     _register_core_routes(app)
     return app
@@ -243,15 +244,7 @@ async def handle_websocket(websocket: WebSocket, client_id: str) -> None:
             "type": "connected",
             "client_id": client_id,
             "server_version": settings.version,
-            "capabilities": {
-                "symbolic_solver": True,
-                "llm": container.ai_service.any_llm_available,
-                "llm_name": container.ai_service.llm_name,
-                "speech": bool(getattr(container.audio_service, "meralion_service", None)),
-                "drawing_recognition": container.ai_service.llm_ready,
-                "knowledge_base": container.knowledge_service.is_healthy(),
-                "practice": container.practice_service.is_healthy(),
-            },
+            "capabilities": container.capabilities(),
             "timestamp": utc_now_iso(),
         },
     )

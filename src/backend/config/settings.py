@@ -74,13 +74,20 @@ class Settings(BaseSettings):
     # Off by default so the desktop app is usable immediately without the ML stack.
     preload_models: bool = False
 
-    # Optional OpenAI-compatible chat endpoint (OpenAI, Azure, Ollama, LM Studio,
-    # vLLM, ...). Used for word problems / practice generation when no local
-    # reasoning model is loaded. Off unless a base URL is configured.
-    llm_api_base_url: Optional[str] = None  # e.g. https://api.openai.com/v1 or http://localhost:11434/v1
+    # Language model source. ``auto`` = the local model when one is loaded,
+    # otherwise the remote API; ``local`` / ``remote`` pin one side. The user
+    # can change this at runtime from the app; the choice is persisted in
+    # <data_dir>/llm_config.json and overrides these environment defaults.
+    llm_mode: str = "auto"
+
+    # Optional OpenAI-compatible chat endpoint (OpenRouter, OpenAI, Ollama,
+    # LM Studio, vLLM, ...). Used for word problems / practice generation.
+    llm_api_base_url: Optional[str] = None  # e.g. https://openrouter.ai/api/v1 or http://localhost:11434/v1
     llm_api_key: Optional[str] = None
     llm_api_model: str = "gpt-4o-mini"
     llm_api_timeout_seconds: float = 60.0
+    # Convenience: setting just this selects the OpenRouter preset.
+    openrouter_api_key: Optional[str] = None
 
     # Course-material knowledge base (Chroma vector store)
     knowledge_dir: Optional[Path] = None  # defaults to <data_dir>/knowledge
@@ -159,7 +166,8 @@ class Settings(BaseSettings):
 
     @property
     def remote_llm_configured(self) -> bool:
-        return bool(self.llm_api_base_url)
+        """Environment-level hint only; the runtime store in services.llm_config is authoritative."""
+        return bool(self.llm_api_base_url or self.openrouter_api_key)
 
     def ensure_directories(self) -> None:
         """Create the runtime directories the backend writes to."""
