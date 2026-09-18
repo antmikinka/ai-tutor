@@ -202,10 +202,10 @@ export const PracticePage: React.FC = () => {
           </Typography>
         </Box>
 
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }} flexWrap="wrap" rowGap={1.5} useFlexGap>
           <TextField
             size="small"
-            fullWidth
+            sx={{ flex: 1, minWidth: 240 }}
             label="Topic"
             placeholder={noKnowledge ? 'e.g. percent discounts, quadratics, derivatives' : 'Leave blank to practise from your material'}
             value={topic}

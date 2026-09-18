@@ -182,7 +182,7 @@ def t_simple_interest(rng, difficulty):
     years = _n(rng, 2, 6)
     interest = principal * rate * years // 100
     name = _name(rng)
-    eq = f"{principal}*r/100*{years} = {interest}"
+    eq = f"{principal}*(r/100)*{years} = {interest}"
     return Generated(
         f"{name} deposits ${principal} in an account paying simple interest. After {years} years the account has earned "
         f"${interest} in interest. What is the annual interest rate, in percent?",
