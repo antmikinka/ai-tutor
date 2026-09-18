@@ -1,578 +1,190 @@
-# 🎓 AI Math Tutor - Complete Implementation Guide
+# AI Math Tutor
 
-## 📋 Project Overview
+A desktop math tutor built with Electron + React (renderer) and a Python FastAPI
+backend. The core solver is an exact, offline computer-algebra engine (SymPy);
+local AI models for word problems, handwriting recognition and speech are
+optional and loaded on demand.
 
-This is a **complete, production-ready implementation** of a multimodal AI math tutor application built with Electron, React, and Python FastAPI. The application provides interactive mathematics learning with real-time AI assistance, drawing capabilities, and intelligent feedback.
+## What it does
 
-### 🎯 Core Features
-- **Interactive Drawing Board** - Mouse-based mathematical expression input with Fabric.js
-- **AI Assistant Integration** - Real-time mathematical problem-solving guidance
-- **WebSocket Communication** - Real-time bidirectional communication between frontend and backend
-- **TypeScript Support** - Full type safety across the application
-- **Material-UI Interface** - Modern, responsive user interface
-- **Drawing Canvas** - Advanced drawing with pen, eraser, text, and shape tools
-- **Mathematical Processing** - SymPy integration for mathematical computations
+| Capability | Backed by | Availability |
+| --- | --- | --- |
+| Solve equations, systems, inequalities; derivatives, integrals, limits; simplify / factor / expand; arithmetic — with steps, LaTeX and answer checking | `src/backend/services/math_engine.py` (SymPy) | Always, offline, no GPU |
+| Whiteboard: pen, eraser, text, line, rectangle, ellipse; undo/redo; export PNG/PDF; basic ink analysis | Fabric.js + Pillow/NumPy | Always |
+| Free-form / word problems, handwriting recognition | Qwen3-Omni-30B-A3B-Thinking | Optional: needs the ML stack, the model on disk and a GPU |
+| Voice input | MERaLiON-AudioLLM (Whisper fallback) | Optional: needs the ML stack and model |
+| Spoken answers | VibeVoice-1.5B (XTTS fallback) | Optional: needs the ML stack and model |
 
-## 🏗️ Architecture Overview
+When an optional model is not loaded the UI says so and disables the
+corresponding button; the backend never fabricates results.
+
+## Architecture
 
 ```
-📱 Frontend (Electron + React + TypeScript)
-├── Main Process (Electron)
-│   ├── Window Management
-│   ├── IPC Communication
-│   ├── Preload Script (Security)
-│   └── Backend Process Management
-├── Renderer Process (React)
-│   ├── Drawing Canvas (Fabric.js)
-│   ├── Chat Interface
-│   ├── Tool Selection
-│   ├── Settings Management
-│   └── WebSocket Client
-└── Build System (React Scripts)
+Electron main (src/main/main.js)
+  ├─ spawns/reuses the Python backend on 127.0.0.1:8000, forwards its status
+  ├─ CSP, single-instance lock, settings store, file dialogs
+  └─ BrowserWindow ──preload.js (contextBridge)──► React renderer (src/renderer)
+                                                     ├─ one WebSocket (WebSocketProvider) + REST fallback
+                                                     ├─ MathTutorPage: whiteboard + tutor chat
+                                                     └─ SettingsPage: models, resources, preferences
 
-🔧 Backend (Python + FastAPI)
-├── FastAPI Server
-├── WebSocket Manager
-├── AI Services (SymPy)
-├── Audio Processing Pipeline
-├── Mathematical Engine
-└── Health Monitoring
-
-🤖 Integration Layer
-├── IPC Communication
-├── WebSocket Protocol
-├── Settings Management
-└── State Synchronization
+FastAPI backend (src/backend/main.py)
+  ├─ /ws/{client_id}      validated JSON protocol, request_id correlation
+  ├─ /api/math/*          solve, verify, batch, history, analyze-drawing
+  ├─ /api/drawing/*       image + stroke analysis
+  ├─ /api/audio/*         speech-to-text / text-to-speech (report unavailable without models)
+  ├─ /api/models/*        list, load, unload, status, resources, auto-load config
+  ├─ /api/system/*        status, config, logs, metrics
+  └─ services/            ServiceContainer singletons: AI (math engine + optional LLM),
+                          audio, drawing, model management
 ```
 
-### Technical Stack
-- **Frontend**: Electron 28.1.0 + React 18.2.0 + TypeScript 4.9.5 + Material-UI 5.14.20
-- **Backend**: Python + FastAPI 0.104.1 + WebSocket + SymPy 1.12
-- **Drawing**: Fabric.js 5.3.0 + Canvas API
-- **Math**: KaTeX 0.16.9 + Math.js 12.2.0 + SymPy
-- **Build**: React Scripts + Electron Builder
+## Requirements
 
-## 🚀 Quick Start Guide
+- Node.js 18+ and npm
+- Python 3.10+ (3.12 tested)
+- Windows 10/11 is the packaging target; development also works on macOS/Linux
+- For optional models: an NVIDIA GPU with recent CUDA drivers and tens of GB of disk
 
-### 📋 Prerequisites
+## Quick start (development)
 
-#### System Requirements
-- **Operating System**: Windows 10/11 (Primary), macOS/Linux (Compatible)
-- **RAM**: 8GB minimum, 16GB recommended
-- **Storage**: 5GB free space
-- **Processor**: x64 architecture
-
-#### Required Software
-- **Node.js**: 18.x or higher (16.x minimum)
-- **Python**: 3.9+ recommended (3.8+ minimum) for AI library compatibility
-- **Git**: For version control
-
-### 🔧 Installation & Setup
-
-#### 1. Clone the Repository
 ```bash
-# If you have the repository URL, clone with:
-git clone <your-repository-url>
-cd ai-llm-swift-app
+npm install                      # also installs src/renderer dependencies
+python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r src/backend/requirements.txt -r src/backend/requirements-dev.txt
 
-# If working with local files, navigate to the project directory:
-cd path\to\ai-llm-swift-app
+python start_app.py              # backend + Electron with hot reload
 ```
 
-#### 2. Install Dependencies
+`start_app.py` starts the backend, waits for `/health`, then runs `npm run dev`
+(React dev server on :3000 + Electron). Use `--backend-only` to just run the
+API (docs at <http://127.0.0.1:8000/api/docs>), `--port N` to change the port.
 
-**Install Node.js Dependencies:**
+Alternatively run the pieces yourself:
+
 ```bash
-# Install root dependencies
-npm install
-
-# Install frontend dependencies
-npm run postinstall
+npm run dev:backend     # python main.py in src/backend
+npm run dev             # React dev server + Electron (Electron reuses a running backend)
 ```
 
-**Install Python Dependencies:**
+Electron picks the backend interpreter from `MATH_TUTOR_PYTHON`, then a bundled
+`resources/python`, then `venv/` or `.venv/` in the repo, then `python` on PATH.
+Set `MATH_TUTOR_SKIP_BACKEND=1` to stop Electron from managing the backend.
+
+## Optional AI models
+
 ```bash
-# Create and activate virtual environment (recommended)
-python -m venv venv
-
-# Windows:
-venv\Scripts\activate
-
-# macOS/Linux:
-source venv/bin/activate
-
-# Install backend Python packages
-npm run install:python-deps
+pip install -r src/backend/requirements-ml.txt   # torch, transformers, accelerate, audio libs
+python scripts/setup_models.py --list
+python scripts/setup_models.py --model Qwen3-Omni-30B-A3B-Thinking
 ```
 
-#### 3. Start the Application
+Then open **Settings → AI models** in the app and press **Load**. The Settings
+page shows why a model cannot be loaded (ML stack missing, not downloaded, no
+GPU, insufficient RAM/disk). Models live under `src/backend/models/` in
+development and under the app's user-data folder when packaged (`MODEL_DIR`
+overrides both).
 
-**Method 1: Simple Start (Recommended for Development)**
+## Configuration
+
+Backend settings come from environment variables or `src/backend/.env`
+(see `src/backend/config/settings.py`). Commonly used:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HOST` / `PORT` | `127.0.0.1` / `8000` | Bind address (loopback only by design) |
+| `AI_USE_GPU` | `true` | Use CUDA when available |
+| `PRELOAD_MODELS` | `false` | Warm heavy models in the background after start |
+| `MODEL_DIR`, `DATA_DIR`, `LOG_DIR` | under `src/backend/` | Storage locations |
+| `LOG_LEVEL` | `INFO` | Logging verbosity |
+| `MAX_WEBSOCKET_MESSAGE_BYTES` | 8 MiB | Upper bound for one WebSocket frame (drawings) |
+
+Renderer: `REACT_APP_BACKEND_URL` at build time (Electron overrides it at run
+time with the port it manages). User preferences are stored via
+`electron-store` (or `localStorage` in a plain browser).
+
+## Testing and checks
+
 ```bash
-# Start the complete application
-npm start
-```
-
-This command will:
-- Start the Electron main process
-- Launch the React development server (localhost:3000)
-- Start the Python FastAPI backend (localhost:8000)
-- Open the application window
-
-**Method 2: Development Mode**
-```bash
-# Start with hot reload for React
-npm run dev
-```
-
-**Method 3: Manual Component Start**
-```bash
-# Terminal 1: Start React development server
-cd src/renderer && npm start
-
-# Terminal 2: Start Python backend
-cd src/backend && python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
-
-# Terminal 3: Start Electron (after React is ready)
-npm start
-```
-
-### 🎮 Application Interface
-
-#### Main Features
-- **Drawing Canvas** - Central canvas for mathematical work with tools:
-  - ✏️ Pen tool for drawing
-  - 🧹 Eraser tool for corrections
-  - 📝 Text tool for mathematical expressions
-  - ⬛ Shape tool for geometric shapes
-- **Tool Palette** - Drawing tools, undo/redo, clear canvas
-- **AI Assistant** - Chat interface for mathematical guidance
-- **Settings Panel** - Application configuration
-
-#### Keyboard Shortcuts
-- `Ctrl+Z` - Undo drawing action
-- `Ctrl+Y` - Redo drawing action
-- `F1` - Help (when implemented)
-- `Ctrl+Shift+R` - Reload application (development mode)
-
-## 🔧 Project Structure
-
-```
-ai-llm-swift-app/
-├── 📄 package.json              # Main project configuration
-├── 📁 src/
-│   ├── 📁 main/                 # Electron main process
-│   │   ├── 📄 main.js          # Main application entry point
-│   │   └── 📄 preload.js       # Preload script (security bridge)
-│   ├── 📁 renderer/             # React frontend
-│   │   ├── 📄 package.json     # Frontend dependencies
-│   │   ├── 📄 tsconfig.json    # TypeScript configuration
-│   │   ├── 📁 public/          # Static assets
-│   │   ├── 📁 build/           # Production build output
-│   │   └── 📁 src/             # React source code
-│   │       ├── 📁 components/  # React components
-│   │       │   ├── 📄 DrawingCanvas.tsx
-│   │       │   ├── 📄 ChatInterface.tsx
-│   │       │   └── 📄 MathInput.tsx
-│   │       ├── 📁 pages/       # Application pages
-│   │       │   ├── 📄 MathTutorPage.tsx
-│   │       │   ├── 📄 SettingsPage.tsx
-│   │       │   └── 📄 HelpPage.tsx
-│   │       ├── 📁 hooks/       # Custom React hooks
-│   │       │   ├── 📄 useWebSocket.ts
-│   │       │   └── 📄 useAppSettings.ts
-│   │       ├── 📁 contexts/    # React contexts
-│   │       │   └── 📄 SettingsContext.tsx
-│   │       ├── 📁 services/    # API services
-│   │       ├── 📁 styles/      # CSS styles
-│   │       ├── 📄 App.tsx      # Main React component
-│   │       └── 📄 index.tsx    # React entry point
-│   └── 📁 backend/              # Python FastAPI backend
-│       ├── 📄 requirements.txt # Python dependencies
-│       ├── 📄 main.py          # Backend entry point
-│       ├── 📁 api/             # API endpoints
-│       │   └── 📄 websocket_manager.py
-│       ├── 📁 services/        # Business logic
-│       │   ├── 📄 ai_service.py
-│       │   ├── 📄 audio_service.py
-│       │   └── 📄 model_service.py
-│       └── 📁 models/          # AI models directory
-├── 📁 assets/                  # Application assets
-└── 📁 dist/                    # Build output
-```
-
-## 🔧 Component Architecture
-
-### 1. Drawing Canvas Component (`DrawingCanvas.tsx`)
-
-**Features:**
-- Fabric.js integration for advanced drawing
-- Multiple tools: pen, eraser, text, shapes
-- Undo/redo functionality with history management
-- Real-time canvas data export
-- Responsive canvas sizing
-- TypeScript type safety
-
-**Key Methods:**
-- `getCanvas()` - Get Fabric.js canvas instance
-- `clear()` - Clear all drawings
-- `undo()/redo()` - Navigate drawing history
-- `toDataURL()` - Export canvas as image
-- `setDrawingMode()` - Toggle drawing mode
-
-### 2. WebSocket Hook (`useWebSocket.ts`)
-
-**Features:**
-- Automatic connection management
-- Reconnection logic with exponential backoff
-- Message queuing
-- Connection status monitoring
-- TypeScript message typing
-
-### 3. Main Process (`main.js`)
-
-**Features:**
-- Electron window management
-- IPC communication handlers
-- Backend process management
-- Settings persistence
-- Development mode detection
-- Security configuration
-
-### 4. Backend Services (`main.py`)
-
-**Features:**
-- FastAPI application setup
-- WebSocket connection management
-- AI service integration
-- Mathematical computation with SymPy
-- Health monitoring endpoints
-
-## 🚀 Build & Deployment
-
-### Development Build
-```bash
-# Build React frontend
-npm run build:react
-
-# Start development server
-npm run dev
-```
-
-### Production Build
-```bash
-# Build complete application
-npm run build
-
-# Build Windows installer
-npm run dist
-
-# Build portable version
-npm run pack
-```
-
-### Build Outputs
-- `dist/` - Built application files
-- `src/renderer/build/` - React production build
-- Windows installer (`.exe`) with NSIS
-- Portable executable (no installation required)
-
-## 🔧 Configuration
-
-### Environment Variables
-
-Create a `.env` file in the project root (optional):
-
-```env
-# Development Settings
-NODE_ENV=development
-REACT_APP_BACKEND_URL=http://localhost:8000
-
-# Backend Settings
-DEBUG=true
-HOST=0.0.0.0
-PORT=8000
-
-# Model Settings (future implementation)
-AI_TEMPERATURE=0.7
-AI_USE_GPU=true
-```
-
-### Application Settings
-
-Settings are managed through Electron Store and persisted locally:
-- Window bounds and position
-- Backend URL configuration
-- WebSocket connection settings
-- Audio/video device settings
-- Model preferences
-
-## 🛠️ Development Commands
-
-### Frontend Commands
-```bash
-# Install dependencies
-npm install
-
-# Start development server
-npm run dev:react
-
-# Build for production
-npm run build:react
-
-# Run tests
-npm run test
-
-# Run linting
+npm test                 # backend pytest + renderer tests
+npm run test:backend     # 60 tests: math engine, REST API, WebSocket protocol
+npm run typecheck        # tsc --noEmit for the renderer
 npm run lint
-npm run lint:fix
 ```
 
-### Backend Commands
+## Building the Windows app
+
 ```bash
-# Install Python dependencies
-npm run install:python-deps
-
-# Start development server
-npm run dev:backend
-
-# Start with specific configuration
-cd src/backend && python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+npm run build            # React production build + NSIS installer + portable exe → dist/
+npm run pack             # unpacked directory for inspection
 ```
 
-### Application Commands
-```bash
-# Start complete application
-npm start
+The installer ships the backend as Python source under
+`resources/backend` and expects Python 3.10+ on the target machine (the
+installer warns if it is missing). Bundling an interpreter is not yet done;
+place one at `resources/python/python.exe` and Electron will prefer it.
 
-# Start in development mode
-npm run dev
+## Project layout
 
-# Build application
-npm run build
-npm run pack
-npm run dist
+```
+package.json               Electron app, scripts, electron-builder config
+start_app.py               development launcher
+assets/                    icon, installer.nsh (NSIS customInstall/customUnInstall hooks)
+scripts/                   model download / optimisation helpers
+src/main/                  Electron main process + preload
+src/renderer/              CRA + TypeScript renderer
+  src/lib/backend.ts       backend URL resolution + typed fetch
+  src/types/protocol.ts    WebSocket message types shared with main.py
+  src/hooks/useWebSocket.ts one self-healing socket with request/response correlation
+  src/components/          DrawingCanvas, ChatInterface, MathInput, ConnectionStatus, layout
+  src/pages/               MathTutorPage, SettingsPage, HelpPage
+src/backend/
+  main.py                  app factory, lifespan, WebSocket protocol
+  api/dependencies.py      ServiceContainer (single instance of each service)
+  api/routes/              math, drawing, audio, system, model routers
+  services/math_engine.py  SymPy solver, parser sandbox, steps, verification
+  services/                AI / audio / drawing / model services, optional_deps
+  tests/                   pytest suite
+  requirements*.txt        core / ml / dev dependency sets
 ```
 
-## 🔧 Troubleshooting
+## WebSocket protocol (summary)
 
-### Common Issues & Solutions
+Connect to `ws://127.0.0.1:8000/ws/{client_id}`. The server first sends
+`{"type":"connected", "capabilities": {symbolic_solver, llm, speech, drawing_recognition}}`.
+Client messages are JSON with a `type` and optional `request_id`, which the
+server echoes on the reply:
 
-#### 1. Blank White Screen
-**Issue**: Electron window opens but shows blank white screen
-**Solution**: The application loads React from localhost:3000. Ensure the React development server is running:
-```bash
-cd src/renderer && npm start
-```
+| Client `type` | Fields | Server reply |
+| --- | --- | --- |
+| `ping` | – | `pong` |
+| `math_input` | `content`, `metadata?` | `math_solution` (+ `audio_response` if TTS enabled and available) |
+| `verify` | `problem`, `solution` | `verification` |
+| `drawing` | `data` (data URL or `{image}`), `analysis_type?` | `drawing_analysis` |
+| `audio` | `data` (base64), `language?`, `format?` | `audio_transcription` |
 
-#### 2. WebSocket Connection Failed
-**Issue**: WebSocket connection errors in console
-**Solution**: Ensure the Python backend is running on the correct port:
-```bash
-cd src/backend && python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
+Invalid input yields `{"type":"error","code":...,"message":...}` without
+closing the connection. Full types: `src/renderer/src/types/protocol.ts`.
 
-#### 3. Port Already in Use
-**Issue**: Port 3000 or 8000 already occupied
-**Solution**: Find and kill the process or use different ports:
-```bash
-# Find process using port
-netstat -ano | findstr :3000
-netstat -ano | findstr :8000
+## Security notes
 
-# Kill the process
-taskkill /PID <PID> /F
-```
+- Renderer runs with `contextIsolation`, `sandbox`, no Node integration; the
+  preload exposes a small typed API and never the raw `ipcRenderer`.
+- A Content-Security-Policy header is applied to every response; `unsafe-eval`
+  is only allowed in development for CRA hot reload.
+- The backend binds to loopback only; CORS is restricted to the dev server and
+  the packaged `file://` origin.
+- The math parser is sandboxed: whitelisted functions/symbols, no attribute
+  access, no builtins, size limits, and CPU-bound work runs with a timeout.
 
-#### 4. Python Dependencies Not Found
-**Issue**: Module import errors in backend
-**Solution**: Install Python dependencies:
-```bash
-npm run install:python-deps
-```
+## Known limitations
 
-#### 5. Node Modules Issues
-**Issue**: Frontend build errors or missing dependencies
-**Solution**: Clean and reinstall:
-```bash
-# Clean node modules
-rmdir /s node_modules
-rmdir /s src\renderer\node_modules
+- Word problems, handwriting and speech need the optional models and a GPU.
+- Solution history is in-memory per backend process.
+- macOS/Linux packaging targets are not configured (development works).
+- The installer does not bundle a Python runtime.
 
-# Reinstall
-npm install
-npm run postinstall
-```
+## License
 
-#### 6. Drawing Canvas Not Working
-**Issue**: Canvas doesn't respond to mouse input
-**Solution**: Check browser console for Fabric.js loading errors. Ensure TypeScript compilation is successful.
-
-### Debug Information
-
-#### Console Logs
-- **Main Process**: Check the Electron terminal for main process logs
-- **Renderer Process**: Open DevTools (F12) for React/frontend logs
-- **Backend**: Check the Python terminal for backend logs
-
-#### Log Locations
-- **Electron**: Console output in terminal
-- **React**: Browser DevTools console
-- **Python**: Terminal output
-- **WebSocket**: Connection status in DevTools console
-
-## 🧪 Testing
-
-### Frontend Tests
-```bash
-# Run React tests
-cd src/renderer && npm run test
-
-# Run tests with coverage
-npm run test -- --coverage
-
-# Run tests in watch mode
-npm run test:watch
-```
-
-### Backend Tests
-```bash
-cd src/backend
-python -m pytest tests/ -v
-```
-
-### Manual Testing Checklist
-- [ ] Application starts without errors
-- [ ] Drawing canvas responds to mouse input
-- [ ] Tool switching works (pen, eraser, text, shapes)
-- [ ] Undo/redo functionality works
-- [ ] WebSocket connection established
-- [ ] Settings persistence works
-- [ ] Window resize handles correctly
-- [ ] IPC communication works
-
-## 📚 API Documentation
-
-### WebSocket Communication
-
-**Connection URL**: `ws://localhost:8000/ws/{client_id}`
-
-**Message Format**:
-```typescript
-interface WebSocketMessage {
-  type: string;
-  data: any;
-  timestamp: string;
-}
-```
-
-**Message Types**:
-- `math_input` - Mathematical problem submission
-- `drawing_update` - Canvas data updates
-- `audio_data` - Audio processing requests
-- `system_info` - System information exchange
-
-### REST API Endpoints
-
-**Base URL**: `http://localhost:8000/api`
-
-- `GET /health` - Health check
-- `POST /math/solve` - Solve mathematical problems
-- `POST /audio/process` - Process audio input
-- `GET /system/info` - System information
-
-## 🔒 Security Features
-
-### Electron Security
-- Context isolation enabled
-- Node integration disabled in renderer
-- Preload script for secure IPC
-- Content Security Policy (CSP) configuration
-- Secure model loading procedures
-
-### Data Privacy
-- Local processing only
-- No external data transmission
-- Secure inter-process communication
-- Settings encryption at rest
-
-## 🚀 Future Enhancements
-
-### Planned Features
-- AI model integration (Qwen3-Omni, VibeVoice, MERaLiON)
-- Voice input/output capabilities
-- Advanced mathematical recognition
-- Multi-language support
-- Cloud synchronization (optional)
-- Mobile app development
-
-### Extensibility
-- Plugin system for custom tools
-- Custom AI model integration
-- Theme system
-- Export format extensions
-- API for third-party integration
-
-## 🤝 Contributing
-
-### Development Workflow
-1. Fork the repository
-2. Create a feature branch
-3. Implement changes with tests
-4. Update documentation
-5. Submit pull request
-
-### Code Standards
-- TypeScript for type safety
-- ESLint for code quality
-- Prettier for formatting
-- Conventional commits
-- Comprehensive testing
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- **Electron Team** - Cross-platform application framework
-- **React Team** - User interface library
-- **Fabric.js** - Canvas drawing library
-- **Material-UI** - React component library
-- **FastAPI** - Modern Python web framework
-- **SymPy** - Symbolic mathematics library
-
-## 📞 Support
-
-### Getting Help
-- **Documentation**: This README and inline code comments
-- **Issues**: Report bugs via GitHub Issues
-- **Development**: Check console logs for debugging information
-
-### Troubleshooting Steps
-1. Check prerequisites are installed
-2. Verify all dependencies are installed
-3. Check console for error messages
-4. Ensure ports 3000 and 8000 are available
-5. Consult the troubleshooting section above
-
----
-
-## 🎉 Application Status: ✅ FULLY FUNCTIONAL
-
-This AI Math Tutor application is **complete and operational** with:
-
-✅ **Working Drawing Canvas** - Full drawing functionality with multiple tools
-✅ **React Frontend** - Modern, responsive user interface
-✅ **Electron Desktop App** - Native desktop application
-✅ **Python Backend** - FastAPI server with WebSocket support
-✅ **TypeScript Support** - Full type safety across the application
-✅ **Real-time Communication** - WebSocket integration
-✅ **State Management** - Persistent settings and application state
-✅ **Build System** - Complete development and production builds
-
-**Ready to use for interactive mathematical learning and AI-assisted tutoring!**
-
----
-
-*Built with ❤️ for the future of education*
+MIT.
