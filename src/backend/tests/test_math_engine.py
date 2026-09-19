@@ -114,3 +114,21 @@ def test_detect_problem_type():
 
 def test_result_raw_object_is_sympy():
     assert isinstance(solve("derivative of x^2").result, sp.Basic)
+
+
+def test_interest_and_energy_letters_are_variables_when_needed():
+    # "I" is SymPy's imaginary unit, but here it clearly means interest.
+    result = solve("1200*0.05*3 = I")
+    assert result.problem_type == "equation" and result.variable == "I"
+    assert result.solution.replace(" ", "") in {"I=180", "I=180.0", "I=180.000000000000"}
+    energy = solve("E = 2*9.8*5")
+    assert energy.variable == "E" and "98" in energy.solution
+    # The imaginary unit still works where it is genuinely meant.
+    assert verify("x^2 = -1", "x = I, x = -I")["is_correct"] is True
+
+
+def test_constant_equation_is_a_parse_error():
+    with pytest.raises(MathParseError, match="constants"):
+        solve("2 + 2 = 4")
+    with pytest.raises(MathParseError, match="constants"):
+        solve("3*4 = 11")

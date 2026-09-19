@@ -220,7 +220,9 @@ def test_remote_client_openrouter_specifics():
                     "data": [
                         {"id": "zeta/cheap:free", "name": "Zeta", "context_length": 8000, "pricing": {"prompt": "0", "completion": "0"}},
                         {"id": "openai/gpt-4o-mini", "name": "GPT-4o mini", "context_length": 128000, "pricing": {"prompt": "0.00000015", "completion": "0.0000006"}},
-                        {"id": "acme/model", "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+                        {"id": "acme/model", "pricing": {"prompt": "0.000001", "completion": "0.000002"}, "supported_parameters": ["temperature", "response_format"], "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]}},
+                        {"id": "music/gen", "pricing": {"prompt": "0", "completion": "0"}, "architecture": {"input_modalities": ["text"], "output_modalities": ["text", "audio"]}},
+                        {"id": "pix/gen", "pricing": {"prompt": "0", "completion": "0"}, "architecture": {"input_modalities": ["text"], "output_modalities": ["image"]}},
                         {"not": "a model"},
                     ]
                 },
@@ -238,6 +240,7 @@ def test_remote_client_openrouter_specifics():
     assert [m["id"] for m in models] == ["openai/gpt-4o-mini", "acme/model", "zeta/cheap:free"]  # recommended first, then alpha
     assert models[0]["recommended"] is True and models[0]["free"] is False
     assert models[2]["free"] is True and models[2]["context_length"] == 8000
+    assert models[1]["json_mode"] is True and models[1]["vision"] is True and models[0]["json_mode"] is None
     assert seen["headers"]["x-title"] == "AI Math Tutor" and seen["headers"]["authorization"] == "Bearer sk-or-x"
     assert asyncio.run(client.list_models()) is models  # cached
 

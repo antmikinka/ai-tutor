@@ -84,16 +84,17 @@ OPENROUTER_HEADERS = {
 # Curated OpenRouter models that do well on maths; flagged in the model list when present.
 OPENROUTER_RECOMMENDED = (
     "openai/gpt-4o-mini",
+    "openai/gpt-4.1-mini",
+    "openai/gpt-5-mini",
     "openai/gpt-4o",
     "openai/o3-mini",
+    "anthropic/claude-sonnet-4",
     "anthropic/claude-3.5-sonnet",
-    "anthropic/claude-3.7-sonnet",
+    "google/gemini-2.5-flash",
     "google/gemini-2.0-flash-001",
-    "google/gemini-flash-1.5",
     "deepseek/deepseek-r1",
     "deepseek/deepseek-chat",
     "qwen/qwen-2.5-72b-instruct",
-    "qwen/qwq-32b",
     "meta-llama/llama-3.3-70b-instruct",
 )
 
@@ -236,10 +237,21 @@ class RemoteLLMClient:
         for item in raw:
             if not isinstance(item, dict) or not item.get("id"):
                 continue
+            arch = item.get("architecture") or {}
+            outputs = arch.get("output_modalities")
+            inputs = arch.get("input_modalities")
+            # Skip image/audio generators etc.; we need something that reads and writes text.
+            if isinstance(outputs, list) and "text" not in outputs:
+                continue
+            if isinstance(inputs, list) and "text" not in inputs:
+                continue
+            if isinstance(outputs, list) and "audio" in outputs and not (isinstance(inputs, list) and "audio" in inputs):
+                continue  # music / speech generators (e.g. Lyria) that merely echo a text caption
             pricing = item.get("pricing") or {}
             prompt_price = _price(pricing.get("prompt"))
             completion_price = _price(pricing.get("completion"))
             model_id = str(item["id"])
+            supported = item.get("supported_parameters")
             models.append(
                 {
                     "id": model_id,
@@ -248,6 +260,8 @@ class RemoteLLMClient:
                     "prompt_price": prompt_price,
                     "completion_price": completion_price,
                     "free": (prompt_price == 0 and completion_price == 0) if pricing else None,
+                    "json_mode": ("response_format" in supported) if isinstance(supported, list) else None,
+                    "vision": ("image" in inputs) if isinstance(inputs, list) else None,
                     "recommended": self.provider == "openrouter" and model_id in OPENROUTER_RECOMMENDED,
                 }
             )

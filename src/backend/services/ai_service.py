@@ -372,7 +372,9 @@ class AIService:
         "with ONLY a JSON object: {\"equation\": string (a single equation or expression the symbolic engine can "
         "solve, e.g. '3*x + 5 = 20' or 'derivative of x^2'), \"variable\": string|null, \"solution\": string "
         "(final answer), \"steps\": [string], \"problem_type\": string, \"confidence\": number 0-1}. "
-        "Use ^ for powers, * for multiplication, sqrt(), pi, E. No prose outside the JSON."
+        "Use ^ for powers, * for multiplication, sqrt(), pi. The equation must contain only numbers, operators and "
+        "ONE unknown written as a single lowercase letter (not e); no words, units or % signs (write 25% as 0.25). "
+        "No prose outside the JSON."
     )
 
     async def _solve_with_remote_llm(self, problem: str, context: Dict[str, Any], started: float) -> Dict[str, Any]:

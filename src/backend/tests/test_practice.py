@@ -171,10 +171,11 @@ def test_generate_with_llm_validates_against_engine(settings):
 def test_generate_with_llm_retries_then_falls_back_to_templates(settings):
     wrong_answer = {"problem": "p", "equation": "2*d + 3 = 17", "answer": "8", "hints": []}
     unparsable = {"problem": "p", "equation": "the vibes", "answer": "1", "hints": []}
-    ai = FakeAI([wrong_answer, unparsable])
+    constant = {"problem": "p", "equation": "2 + 2 = 4", "answer": "4", "hints": []}
+    ai = FakeAI([wrong_answer, unparsable, constant])
     svc = ps.PracticeService(settings, knowledge=None, ai=ai)
     problem = asyncio.run(svc.generate("linear equations", "easy", seed=1))
-    assert ai.calls == 2
+    assert ai.calls == 3
     assert problem["generator"] == "templates"
     assert "could not be verified" in problem["note"]
 

@@ -523,6 +523,11 @@ _LLM_SYSTEM = (
     "\"answer\" (the intended final answer as a number or expression, e.g. '10' or '6*t + 2'), "
     "\"concept\" (2-6 words naming the skill), "
     "\"hints\" (array of exactly 3 progressively more specific hints; the last one may state the equation). "
+    "Rules for \"equation\": only digits, operators, parentheses, known functions (sqrt, sin, ...) and ONE unknown "
+    "written as a single lowercase letter other than e (prefer x, n, t, m, p, r, w); never use words, units, currency "
+    "symbols or percent signs (write 25% as 0.25 or 25/100). Rules for \"answer\": it must be exactly what solving "
+    "your equation yields - a number for an equation, the resulting expression for 'derivative of' / 'integrate' / "
+    "'simplify' commands (not a value at some point). "
     "The problem must be solvable exactly with the equation you give. No prose outside the JSON."
 )
 
@@ -669,9 +674,16 @@ class PracticeService:
             "Write one word problem that practises exactly this material."
         )
         failure = ""
-        for attempt in range(2):
+        for attempt in range(3):
+            prompt = user
+            if failure:
+                prompt = (
+                    f"{user}\n\nYour previous attempt was rejected by the computer-algebra checker: {failure}. "
+                    "Fix it: use a single-letter unknown, no words or units inside the equation, and make sure the "
+                    "answer is exactly what the equation yields. Return the corrected JSON."
+                )
             try:
-                data = await self.ai.complete_json(_LLM_SYSTEM, user if not failure else f"{user}\n\nYour previous attempt was rejected: {failure}. Try again.")
+                data = await self.ai.complete_json(_LLM_SYSTEM, prompt)
             except NoLanguageModelError as exc:
                 return None, None, str(exc)
             problem = str(data.get("problem", "")).strip()

@@ -155,7 +155,13 @@ def _clean_expression_text(text: str) -> str:
     return text.strip()
 
 
-def parse_expression(text: str) -> sp.Expr:
+# SymPy constants that students (and language models) routinely use as plain
+# variables: ``I`` for interest, ``E`` for energy. When treating them as
+# constants makes an equation degenerate we re-parse with these as symbols.
+_CONSTANTS_AS_SYMBOLS = {"I": sp.Symbol("I"), "E": sp.Symbol("E")}
+
+
+def parse_expression(text: str, *, constants_as_symbols: bool = False) -> sp.Expr:
     """Safely parse a single expression. Raises MathParseError on failure."""
     cleaned = _clean_expression_text(text)
     if not cleaned:
@@ -168,10 +174,13 @@ def parse_expression(text: str) -> sp.Expr:
     for word in _IDENTIFIER.findall(cleaned):
         if len(word) > 3 and word not in _ALLOWED_FUNCTIONS and word not in _ALLOWED_SYMBOL_NAMES:
             raise MathParseError(f"Unknown word {word!r} in expression")
+    local_dict = dict(_ALLOWED_FUNCTIONS)
+    if constants_as_symbols:
+        local_dict.update(_CONSTANTS_AS_SYMBOLS)
     try:
         expr = parse_expr(
             cleaned,
-            local_dict=dict(_ALLOWED_FUNCTIONS),
+            local_dict=local_dict,
             global_dict=_GLOBAL_DICT,
             transformations=_TRANSFORMATIONS,
             evaluate=True,
@@ -201,7 +210,20 @@ def parse_equation(text: str) -> sp.Eq:
     lhs, rhs = split
     if not rhs:
         raise MathParseError("Equation is missing a right-hand side")
-    return sp.Eq(parse_expression(lhs), parse_expression(rhs))
+    equation = sp.Eq(parse_expression(lhs), parse_expression(rhs))
+    if isinstance(equation, sp.logic.boolalg.BooleanAtom):
+        # Both sides are constants. Usually "I" or "E" was meant as a variable
+        # (interest, energy), so try again with those as symbols.
+        cleaned = _clean_expression_text(text)
+        if re.search(r"\b[IE]\b", cleaned):
+            equation = sp.Eq(
+                parse_expression(lhs, constants_as_symbols=True),
+                parse_expression(rhs, constants_as_symbols=True),
+            )
+        if isinstance(equation, sp.logic.boolalg.BooleanAtom):
+            verdict = "true" if equation else "false"
+            raise MathParseError(f"Both sides of {text!r} are constants (the statement is {verdict}); there is nothing to solve for")
+    return equation
 
 
 def _pick_variable(exprs: Iterable[sp.Basic], requested: Optional[str] = None) -> sp.Symbol:
