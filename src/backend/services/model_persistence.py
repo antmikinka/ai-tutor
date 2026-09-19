@@ -3,6 +3,7 @@ Model persistence service for saving and restoring model loading states
 """
 
 import json
+import time
 import logging
 from typing import Dict, List, Any, Optional
 from datetime import datetime
@@ -10,6 +11,7 @@ from pathlib import Path
 import asyncio
 
 from config.settings import get_settings
+from services.common import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,7 @@ class ModelPersistenceService:
         try:
             self.model_states[model_name] = {
                 "model_name": model_name,
-                "saved_at": datetime.utcnow().isoformat(),
+                "saved_at": utc_now_iso(),
                 "state": state
             }
 
@@ -132,7 +134,7 @@ class ModelPersistenceService:
             self.auto_load_config = {
                 "enabled": enabled,
                 "models": models or [],
-                "updated_at": datetime.utcnow().isoformat()
+                "updated_at": utc_now_iso()
             }
 
             await self._save_auto_load_config()
@@ -172,7 +174,7 @@ class ModelPersistenceService:
         try:
             if model_name not in self.auto_load_config["models"]:
                 self.auto_load_config["models"].append(model_name)
-                self.auto_load_config["updated_at"] = datetime.utcnow().isoformat()
+                self.auto_load_config["updated_at"] = utc_now_iso()
                 await self._save_auto_load_config()
                 logger.info(f"Added model to auto-load: {model_name}")
 
@@ -189,7 +191,7 @@ class ModelPersistenceService:
         try:
             if model_name in self.auto_load_config["models"]:
                 self.auto_load_config["models"].remove(model_name)
-                self.auto_load_config["updated_at"] = datetime.utcnow().isoformat()
+                self.auto_load_config["updated_at"] = utc_now_iso()
                 await self._save_auto_load_config()
                 logger.info(f"Removed model from auto-load: {model_name}")
 
@@ -204,7 +206,7 @@ class ModelPersistenceService:
             days: Number of days to keep states
         """
         try:
-            cutoff_time = datetime.utcnow().timestamp() - (days * 24 * 60 * 60)
+            cutoff_time = time.time() - (days * 24 * 60 * 60)
             models_to_remove = []
 
             for model_name, state_info in self.model_states.items():
@@ -240,7 +242,7 @@ class ModelPersistenceService:
         try:
             data = {
                 "model_states": self.model_states,
-                "saved_at": datetime.utcnow().isoformat(),
+                "saved_at": utc_now_iso(),
                 "version": "1.0"
             }
 
@@ -286,7 +288,7 @@ class ModelPersistenceService:
             export_data = {
                 "model_states": self.model_states,
                 "auto_load_config": self.auto_load_config,
-                "exported_at": datetime.utcnow().isoformat(),
+                "exported_at": utc_now_iso(),
                 "version": "1.0"
             }
 

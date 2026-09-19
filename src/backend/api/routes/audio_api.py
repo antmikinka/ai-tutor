@@ -2,323 +2,190 @@
 Audio processing API endpoints
 """
 
-import json
-import logging
-from typing import Dict, List, Any, Optional
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from pydantic import BaseModel
-from datetime import datetime
-import uuid
-import base64
-import io
+from __future__ import annotations
 
+import base64
+import binascii
+import io
+import logging
+import uuid
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
+
+from api.dependencies import get_audio_service
 from services.audio_service import AudioService
+from services.common import utc_now_iso
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Pydantic models for request/response
+
 class SpeechToTextRequest(BaseModel):
-    audio_data: str  # Base64 encoded audio
+    audio_data: str = Field(min_length=1)
     language: str = "en"
     model_size: str = "base"
+
 
 class SpeechToTextResponse(BaseModel):
     id: str
     text: str
     confidence: float
     language: str
+    available: bool
+    message: Optional[str] = None
+    model_used: str
     processing_time: float
     timestamp: str
 
+
 class TextToSpeechRequest(BaseModel):
-    text: str
+    text: str = Field(min_length=1, max_length=5000)
     voice: str = "default"
     language: str = "en"
-    speed: float = 1.0
-    pitch: float = 1.0
+    speed: float = Field(1.0, ge=0.25, le=4.0)
+    pitch: float = Field(1.0, ge=0.25, le=4.0)
+
 
 class TextToSpeechResponse(BaseModel):
     id: str
-    audio_data: str  # Base64 encoded audio
+    audio_data: Optional[str]
     duration: float
     sample_rate: int
+    available: bool
+    message: Optional[str] = None
+    model_used: str
     timestamp: str
+
 
 class AudioAnalysisRequest(BaseModel):
-    audio_data: str  # Base64 encoded audio
+    audio_data: str = Field(min_length=1)
     analysis_type: str = "speech_detection"
 
-class AudioAnalysisResponse(BaseModel):
-    id: str
-    has_speech: bool
-    speech_segments: List[Dict[str, Any]]
-    noise_level: float
-    timestamp: str
 
-# Initialize services
-audio_service = AudioService()
+def _decode_audio(data: str) -> io.BytesIO:
+    try:
+        return io.BytesIO(base64.b64decode(data, validate=False))
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="audio_data is not valid base64") from exc
+
 
 @router.post("/speech-to-text", response_model=SpeechToTextResponse)
-async def speech_to_text(request: SpeechToTextRequest):
-    """
-    Convert speech to text using Whisper
-    """
+async def speech_to_text(request: SpeechToTextRequest, audio: AudioService = Depends(get_audio_service)):
     try:
-        logger.info("Processing speech-to-text request")
+        result = await audio.speech_to_text(_decode_audio(request.audio_data), language=request.language, model_size=request.model_size)
+    except Exception as exc:
+        logger.exception("Speech-to-text failed")
+        raise HTTPException(status_code=500, detail=f"Failed to process speech-to-text: {exc}") from exc
+    return SpeechToTextResponse(
+        id=str(uuid.uuid4()),
+        text=result.get("text", ""),
+        confidence=result.get("confidence", 0.0),
+        language=request.language,
+        available=result.get("available", False),
+        message=result.get("message"),
+        model_used=result.get("model_used", "none"),
+        processing_time=result.get("processing_time", 0.0),
+        timestamp=result.get("timestamp", utc_now_iso()),
+    )
 
-        # Convert base64 to audio data
-        audio_bytes = base64.b64decode(request.audio_data)
-        audio_file = io.BytesIO(audio_bytes)
-
-        # Process speech recognition
-        result = await audio_service.speech_to_text(
-            audio_file,
-            language=request.language,
-            model_size=request.model_size
-        )
-
-        return SpeechToTextResponse(
-            id=str(uuid.uuid4()),
-            text=result["text"],
-            confidence=result.get("confidence", 0.0),
-            language=request.language,
-            processing_time=result.get("processing_time", 0.0),
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    except Exception as e:
-        logger.error(f"Error in speech-to-text: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process speech-to-text: {str(e)}")
 
 @router.post("/text-to-speech", response_model=TextToSpeechResponse)
-async def text_to_speech(request: TextToSpeechRequest):
-    """
-    Convert text to speech using TTS
-    """
+async def text_to_speech(request: TextToSpeechRequest, audio: AudioService = Depends(get_audio_service)):
     try:
-        logger.info(f"Processing text-to-speech for text: {request.text[:50]}...")
+        result = await audio.text_to_speech(request.text, voice=request.voice, language=request.language, speed=request.speed, pitch=request.pitch)
+    except Exception as exc:
+        logger.exception("Text-to-speech failed")
+        raise HTTPException(status_code=500, detail=f"Failed to process text-to-speech: {exc}") from exc
+    return TextToSpeechResponse(
+        id=str(uuid.uuid4()),
+        audio_data=result.get("audio_data"),
+        duration=result.get("duration", 0.0),
+        sample_rate=result.get("sample_rate", audio.settings.tts_sample_rate),
+        available=result.get("available", False),
+        message=result.get("message"),
+        model_used=result.get("model_used", "none"),
+        timestamp=result.get("timestamp", utc_now_iso()),
+    )
 
-        # Generate speech
-        result = await audio_service.text_to_speech(
-            request.text,
-            voice=request.voice,
-            language=request.language,
-            speed=request.speed,
-            pitch=request.pitch
-        )
 
-        return TextToSpeechResponse(
-            id=str(uuid.uuid4()),
-            audio_data=result["audio_data"],  # Base64 encoded
-            duration=result.get("duration", 0.0),
-            sample_rate=result.get("sample_rate", 22050),
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    except Exception as e:
-        logger.error(f"Error in text-to-speech: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process text-to-speech: {str(e)}")
-
-@router.post("/analyze-audio", response_model=AudioAnalysisResponse)
-async def analyze_audio(request: AudioAnalysisRequest):
-    """
-    Analyze audio for speech content and quality
-    """
+@router.post("/analyze-audio")
+async def analyze_audio(request: AudioAnalysisRequest, audio: AudioService = Depends(get_audio_service)):
     try:
-        logger.info(f"Analyzing audio with type: {request.analysis_type}")
+        result = await audio.analyze_audio(_decode_audio(request.audio_data), request.analysis_type)
+    except RuntimeError as exc:  # optional dependency missing
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Audio analysis failed")
+        raise HTTPException(status_code=500, detail=f"Failed to analyze audio: {exc}") from exc
+    return {"id": str(uuid.uuid4()), **result, "timestamp": utc_now_iso()}
 
-        # Convert base64 to audio data
-        audio_bytes = base64.b64decode(request.audio_data)
-        audio_file = io.BytesIO(audio_bytes)
-
-        # Analyze audio
-        result = await audio_service.analyze_audio(
-            audio_file,
-            request.analysis_type
-        )
-
-        return AudioAnalysisResponse(
-            id=str(uuid.uuid4()),
-            has_speech=result.get("has_speech", False),
-            speech_segments=result.get("speech_segments", []),
-            noise_level=result.get("noise_level", 0.0),
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    except Exception as e:
-        logger.error(f"Error analyzing audio: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to analyze audio: {str(e)}")
 
 @router.post("/upload-audio")
 async def upload_and_process_audio(
     file: UploadFile = File(...),
     processing_type: str = Form("speech_to_text"),
     language: str = Form("en"),
-    voice: str = Form("default")
+    audio: AudioService = Depends(get_audio_service),
 ):
-    """
-    Upload and process audio file
-    """
+    if not (file.content_type or "").startswith("audio/"):
+        raise HTTPException(status_code=400, detail="File must be an audio file")
+    data = await file.read()
+    if len(data) > audio.settings.max_upload_size:
+        raise HTTPException(status_code=413, detail="Audio exceeds the upload size limit")
+    buffer = io.BytesIO(data)
     try:
-        logger.info(f"Processing uploaded audio: {file.filename}")
-
-        # Validate file type
-        if not file.content_type.startswith("audio/"):
-            raise HTTPException(status_code=400, detail="File must be an audio file")
-
-        # Read file data
-        audio_data = await file.read()
-        audio_file = io.BytesIO(audio_data)
-
-        # Process based on type
         if processing_type == "speech_to_text":
-            result = await audio_service.speech_to_text(audio_file, language=language)
-            return {
-                "filename": file.filename,
-                "processing_type": processing_type,
-                "result": result,
-                "timestamp": datetime.utcnow().isoformat()
-            }
+            result = await audio.speech_to_text(buffer, language=language)
         elif processing_type == "analyze":
-            result = await audio_service.analyze_audio(audio_file)
-            return {
-                "filename": file.filename,
-                "processing_type": processing_type,
-                "result": result,
-                "timestamp": datetime.utcnow().isoformat()
-            }
+            result = await audio.analyze_audio(buffer)
         else:
             raise HTTPException(status_code=400, detail=f"Unknown processing type: {processing_type}")
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Uploaded audio processing failed")
+        raise HTTPException(status_code=500, detail=f"Failed to process audio file: {exc}") from exc
+    return {"filename": file.filename, "processing_type": processing_type, "result": result, "timestamp": utc_now_iso()}
 
-    except Exception as e:
-        logger.error(f"Error processing uploaded audio: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process audio file: {str(e)}")
 
 @router.get("/voices")
-async def get_available_voices():
-    """
-    Get list of available TTS voices
-    """
-    try:
-        voices = await audio_service.get_available_voices()
-        return {
-            "voices": voices,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting available voices: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get available voices: {str(e)}")
+async def get_available_voices(audio: AudioService = Depends(get_audio_service)):
+    return {"voices": await audio.get_available_voices(), "timestamp": utc_now_iso()}
+
 
 @router.get("/languages")
-async def get_supported_languages():
-    """
-    Get list of supported languages for speech recognition and TTS
-    """
-    try:
-        languages = await audio_service.get_supported_languages()
-        return {
-            "languages": languages,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting supported languages: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get supported languages: {str(e)}")
+async def get_supported_languages(audio: AudioService = Depends(get_audio_service)):
+    return {"languages": await audio.get_supported_languages(), "timestamp": utc_now_iso()}
+
 
 @router.get("/audio-devices")
-async def get_audio_devices():
-    """
-    Get list of available audio input/output devices
-    """
-    try:
-        devices = await audio_service.get_audio_devices()
-        return {
-            "devices": devices,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting audio devices: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get audio devices: {str(e)}")
+async def get_audio_devices(audio: AudioService = Depends(get_audio_service)):
+    return {"devices": await audio.get_audio_devices(), "timestamp": utc_now_iso()}
+
 
 @router.get("/models")
-async def get_available_models():
-    """
-    Get list of available speech recognition models
-    """
-    try:
-        models = await audio_service.get_available_models()
-        return {
-            "models": models,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting available models: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get available models: {str(e)}")
+async def get_available_models(audio: AudioService = Depends(get_audio_service)):
+    return {"models": await audio.get_available_models(), "timestamp": utc_now_iso()}
 
-@router.post("/stream-speech-to-text")
-async def stream_speech_to_text(file: UploadFile = File(...)):
-    """
-    Stream speech-to-text processing for real-time applications
-    """
-    try:
-        logger.info(f"Streaming speech-to-text for: {file.filename}")
-
-        # This is a placeholder for streaming implementation
-        # In production, this would use WebSocket for real-time streaming
-        audio_data = await file.read()
-        audio_file = io.BytesIO(audio_data)
-
-        result = await audio_service.speech_to_text(audio_file)
-
-        return {
-            "filename": file.filename,
-            "result": result,
-            "streaming": False,  # Placeholder
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error in streaming speech-to-text: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to stream speech-to-text: {str(e)}")
 
 @router.post("/batch-text-to-speech")
-async def batch_text_to_speech(requests: List[TextToSpeechRequest]):
-    """
-    Process multiple text-to-speech requests in batch
-    """
-    try:
-        logger.info(f"Processing batch of {len(requests)} text-to-speech requests")
-
-        results = []
-        for req in requests:
-            try:
-                result = await audio_service.text_to_speech(
-                    req.text,
-                    req.voice,
-                    req.language,
-                    req.speed,
-                    req.pitch
-                )
-                results.append({
-                    "request": req.dict(),
-                    "result": result,
-                    "status": "success"
-                })
-            except Exception as e:
-                logger.error(f"Error processing text-to-speech request: {e}")
-                results.append({
-                    "request": req.dict(),
-                    "error": str(e),
-                    "status": "failed"
-                })
-
-        return {
-            "results": results,
-            "total_requests": len(requests),
-            "successful_requests": len([r for r in results if r["status"] == "success"]),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error in batch text-to-speech: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process batch text-to-speech: {str(e)}")
+async def batch_text_to_speech(requests: List[TextToSpeechRequest], audio: AudioService = Depends(get_audio_service)):
+    if len(requests) > 20:
+        raise HTTPException(status_code=400, detail="At most 20 requests per batch")
+    results: List[Dict[str, Any]] = []
+    for req in requests:
+        try:
+            result = await audio.text_to_speech(req.text, req.voice, req.language, req.speed, req.pitch)
+            results.append({"request": req.model_dump(), "result": result, "status": "success"})
+        except Exception as exc:
+            results.append({"request": req.model_dump(), "error": str(exc), "status": "failed"})
+    return {
+        "results": results,
+        "total_requests": len(requests),
+        "successful_requests": sum(1 for r in results if r["status"] == "success"),
+        "timestamp": utc_now_iso(),
+    }

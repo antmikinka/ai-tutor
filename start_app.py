@@ -1,276 +1,158 @@
 #!/usr/bin/env python3
 """
-🚀 AI Math Tutor - Python Startup Script
-Production-ready startup script with all critical issues resolved
+Development launcher for AI Math Tutor.
+
+Starts the FastAPI backend, waits until it is healthy, then starts the Electron
+app in development mode (React dev server + Electron). Ctrl+C stops everything.
+
+    python start_app.py                 # backend + desktop app
+    python start_app.py --backend-only  # just the API, e.g. for curl / tests
+    python start_app.py --port 8010
+
+The Python interpreter used for the backend is, in order: --python, a ``venv``
+or ``.venv`` folder next to this file, or the interpreter running this script.
 """
 
+from __future__ import annotations
+
+import argparse
 import os
-import sys
-import subprocess
-import time
-import threading
-import requests
+import shutil
 import signal
-import atexit
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
-# Configuration
-BACKEND_PORT = 8000
-FRONTEND_DELAY = 8  # Seconds to wait for backend before starting frontend
-VENV_PATH = "venv"
-PYTHON_EXE = os.path.join(VENV_PATH, "Scripts", "python.exe") if os.name == 'nt' else os.path.join(VENV_PATH, "bin", "python")
+ROOT = Path(__file__).resolve().parent
+BACKEND_DIR = ROOT / "src" / "backend"
+HOST = "127.0.0.1"
 
-# Color codes for terminal output
-class Colors:
-    GREEN = '\033[92m'
-    CYAN = '\033[96m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BLUE = '\033[94m'
-    WHITE = '\033[97m'
-    BOLD = '\033[1m'
-    END = '\033[0m'
 
-def print_header():
-    """Print the startup header"""
-    print(f"\n{Colors.BOLD}{Colors.GREEN}🎯 AI Math Tutor - Production Startup{Colors.END}")
-    print(f"{Colors.BOLD}{Colors.GREEN}========================================{Colors.END}\n")
+def find_python(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    for venv in (ROOT / "venv", ROOT / ".venv"):
+        candidate = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
 
-def print_step(message, color=Colors.CYAN):
-    """Print a step message"""
-    print(f"{color}{message}{Colors.END}")
 
-def print_success(message):
-    """Print a success message"""
-    print(f"{Colors.GREEN}✅ {message}{Colors.END}")
-
-def print_error(message):
-    """Print an error message"""
-    print(f"{Colors.RED}❌ {message}{Colors.END}")
-
-def print_info(message):
-    """Print an info message"""
-    print(f"{Colors.BLUE}ℹ️  {message}{Colors.END}")
-
-def print_warning(message):
-    """Print a warning message"""
-    print(f"{Colors.YELLOW}⚠️  {message}{Colors.END}")
-
-def check_requirements():
-    """Check if system requirements are met"""
-    print_step("🔍 Checking system requirements...")
-
-    # Check if virtual environment exists
-    if not os.path.exists(PYTHON_EXE):
-        print_error("Virtual environment not found!")
-        print_info("Please run setup first to create virtual environment")
+def check_python_deps(python: str) -> bool:
+    result = subprocess.run(
+        [python, "-c", "import fastapi, uvicorn, sympy, PIL"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"[!] Backend dependencies are missing for {python}:")
+        print("    " + result.stderr.strip().splitlines()[-1])
+        print(f"    Install them with: {python} -m pip install -r src/backend/requirements.txt")
         return False
-
-    # Check if Python works in venv
-    try:
-        result = subprocess.run([PYTHON_EXE, "-c", "import fastapi, uvicorn, websockets"],
-                              capture_output=True, text=True, timeout=10)
-        if result.returncode != 0:
-            print_error("Missing dependencies!")
-            print_info("Please install dependencies first")
-            return False
-    except Exception as e:
-        print_error(f"Python virtual environment issue: {e}")
-        return False
-
-    print_success("System requirements verified")
     return True
 
-def test_backend_ready(port):
-    """Test if backend is ready"""
+
+def backend_healthy(port: int) -> bool:
     try:
-        response = requests.get(f"http://localhost:{port}/health", timeout=2)
-        return response.status_code == 200
-    except:
+        with urllib.request.urlopen(f"http://{HOST}:{port}/health", timeout=2) as response:
+            return response.status == 200
+    except (urllib.error.URLError, OSError):
         return False
 
-def start_backend(port):
-    """Start the backend server"""
-    print_step(f"🐍 Starting AI Math Tutor Backend...")
-    print_info(f"   Port: {port}")
-    print_info(f"   Mode: Lazy Loading")
 
-    # Change to backend directory
-    os.chdir("src/backend")
+def start_backend(python: str, port: int) -> subprocess.Popen:
+    env = {**os.environ, "HOST": HOST, "PORT": str(port), "PYTHONUNBUFFERED": "1"}
+    return subprocess.Popen([python, "main.py"], cwd=BACKEND_DIR, env=env)
 
-    # Start backend process
-    backend_cmd = [os.path.join("..", "..", PYTHON_EXE), "-m", "uvicorn",
-                   "main:app", "--host", "localhost", "--port", str(port), "--reload"]
 
-    try:
-        backend_process = subprocess.Popen(backend_cmd, stdout=subprocess.PIPE,
-                                         stderr=subprocess.STDOUT, text=True)
-
-        # Return to original directory
-        os.chdir("../..")
-
-        return backend_process
-    except Exception as e:
-        print_error(f"Failed to start backend: {e}")
-        os.chdir("../..")  # Ensure we return to original directory
+def start_frontend(port: int) -> subprocess.Popen | None:
+    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
+    if npm is None:
+        print("[!] npm not found on PATH; start the desktop app manually with `npm run dev`.")
         return None
+    if not (ROOT / "node_modules").exists():
+        print("[!] node_modules missing; run `npm install` first.")
+        return None
+    env = {**os.environ, "MATH_TUTOR_BACKEND_PORT": str(port), "MATH_TUTOR_SKIP_BACKEND": "1"}
+    return subprocess.Popen([npm, "run", "dev"], cwd=ROOT, env=env)
 
-def start_frontend():
-    """Start the Electron frontend"""
-    print_step("⚛️  Starting AI Math Tutor Desktop App...")
-    print_info("   UI loads immediately (< 3 seconds)")
-    print_info("   Models load in background (lazy loading)")
 
-    # Start Electron app in development mode
-    try:
-        if os.name == 'nt':
-            # Windows - start in new window with development mode
-            subprocess.Popen(["start", "cmd", "/k", "npm run electron:dev"], shell=True)
+def terminate(processes: list[subprocess.Popen]) -> None:
+    for process in processes:
+        if process.poll() is None:
+            process.terminate()
+    deadline = time.time() + 8
+    for process in processes:
+        try:
+            process.wait(timeout=max(0.1, deadline - time.time()))
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run AI Math Tutor in development mode")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8000)))
+    parser.add_argument("--python", help="Interpreter to run the backend with")
+    parser.add_argument("--backend-only", action="store_true", help="Do not start the Electron app")
+    parser.add_argument("--timeout", type=int, default=60, help="Seconds to wait for the backend health check")
+    args = parser.parse_args()
+
+    python = find_python(args.python)
+    print(f"Backend interpreter: {python}")
+    if not check_python_deps(python):
+        return 1
+
+    processes: list[subprocess.Popen] = []
+
+    def shutdown(*_: object) -> None:
+        print("\nStopping…")
+        terminate(processes)
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    if backend_healthy(args.port):
+        print(f"Backend already running at http://{HOST}:{args.port}; reusing it.")
+    else:
+        print(f"Starting backend on http://{HOST}:{args.port} …")
+        backend = start_backend(python, args.port)
+        processes.append(backend)
+        deadline = time.time() + args.timeout
+        while time.time() < deadline:
+            if backend.poll() is not None:
+                print(f"[!] Backend exited early with code {backend.returncode}.")
+                return 1
+            if backend_healthy(args.port):
+                break
+            time.sleep(0.5)
         else:
-            # macOS/Linux
-            subprocess.Popen(["npm", "run", "electron:dev"], shell=True)
+            print("[!] Backend did not become healthy in time.")
+            terminate(processes)
+            return 1
+        print(f"Backend ready. API docs: http://{HOST}:{args.port}/api/docs")
 
-        print_success("Electron app started in development mode")
-        print_info("   Note: First startup may take a moment to load dependencies")
-        return True
-    except Exception as e:
-        print_error(f"Failed to start frontend: {e}")
-        return False
+    if not args.backend_only:
+        frontend = start_frontend(args.port)
+        if frontend is not None:
+            processes.append(frontend)
 
-def monitor_backend(process):
-    """Monitor backend process and output logs"""
-    print_step("📊 Monitoring backend logs...")
-    print_info("   Press Ctrl+C to stop monitoring")
-
+    print("Press Ctrl+C to stop.")
     try:
         while True:
-            output = process.stdout.readline()
-            if output == '' and process.poll() is not None:
-                break
-            if output:
-                print(f"{Colors.CYAN}Backend: {output.strip()}{Colors.END}")
-            time.sleep(0.1)
+            for process in processes:
+                if process.poll() is not None:
+                    print(f"A child process exited (code {process.returncode}); shutting down.")
+                    terminate(processes)
+                    return process.returncode or 0
+            time.sleep(1)
     except KeyboardInterrupt:
-        print_warning("Monitoring stopped")
-    except Exception as e:
-        print_error(f"Monitoring error: {e}")
+        shutdown()
+    return 0
 
-def cleanup_processes(processes):
-    """Clean up all processes"""
-    print_step("🧹 Cleaning up processes...")
-
-    for process in processes:
-        if process and process.poll() is None:
-            try:
-                process.terminate()
-                process.wait(timeout=5)
-            except:
-                try:
-                    process.kill()
-                except:
-                    pass
-
-    print_success("Cleanup completed")
-
-def main():
-    """Main startup function"""
-    print_header()
-
-    # Store processes for cleanup
-    processes = []
-
-    # Register cleanup function
-    def cleanup():
-        cleanup_processes(processes)
-
-    atexit.register(cleanup)
-    signal.signal(signal.SIGINT, lambda s, f: cleanup() or sys.exit(0))
-    signal.signal(signal.SIGTERM, lambda s, f: cleanup() or sys.exit(0))
-
-    try:
-        # Check requirements
-        if not check_requirements():
-            sys.exit(1)
-
-        print()
-
-        # Start backend
-        backend_process = start_backend(BACKEND_PORT)
-        if not backend_process:
-            sys.exit(1)
-
-        processes.append(backend_process)
-        print()
-
-        # Wait for backend to be ready
-        print_step("⏳ Waiting for backend to start...")
-        backend_ready = False
-        attempts = 0
-        max_attempts = 30
-
-        while not backend_ready and attempts < max_attempts:
-            print_info(f"   Attempt {attempts + 1}/{max_attempts}...")
-            time.sleep(2)
-            backend_ready = test_backend_ready(BACKEND_PORT)
-            attempts += 1
-
-        if not backend_ready:
-            print_error("Backend failed to start!")
-            print_info("Check backend logs for errors")
-            sys.exit(1)
-
-        print_success("Backend is ready!")
-        print_info(f"   URL: http://localhost:{BACKEND_PORT}")
-        print_info(f"   API Docs: http://localhost:{BACKEND_PORT}/api/docs")
-        print()
-
-        # Start frontend
-        if not start_frontend():
-            sys.exit(1)
-
-        print()
-        print_success("🎉 AI Math Tutor is starting successfully!")
-        print()
-        print_step("📋 Key Features:")
-        print_success("   Immediate UI access")
-        print_success("   Models load in background when needed")
-        print_success("   Graceful fallback when models unavailable")
-        print_success("   Real-time drawing and math solving")
-        print_success("   Voice interaction capabilities")
-        print()
-        print_step("🌐 Access Points:")
-        print_info(f"   Backend: http://localhost:{BACKEND_PORT}")
-        print_info(f"   Health: http://localhost:{BACKEND_PORT}/health")
-        print_info(f"   API: http://localhost:{BACKEND_PORT}/api/docs")
-        print()
-        print_step("💡 Usage Tips:")
-        print("   • Drawing board appears immediately")
-        print("   • Settings panel is accessible right away")
-        print("   • AI models load automatically when you solve problems")
-        print("   • Voice features work when you enable them")
-        print()
-        print_warning("🛑 To stop: Press Ctrl+C")
-        print_warning("🔄 To restart: Run this script again")
-        print()
-
-        # Start monitoring backend in a separate thread
-        monitor_thread = threading.Thread(target=monitor_backend, args=(backend_process,))
-        monitor_thread.daemon = True
-        monitor_thread.start()
-
-        # Keep main thread alive
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print_warning("\n🛑 Shutdown requested...")
-            cleanup()
-            print_success("AI Math Tutor stopped successfully")
-
-    except Exception as e:
-        print_error(f"Startup failed: {e}")
-        cleanup()
-        sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

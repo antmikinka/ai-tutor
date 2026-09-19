@@ -73,3 +73,7 @@ models/
 
 # Archive folder (keep structure but ignore contents for initial commit)
 archive/
+# Backend runtime state
+src/backend/data/
+src/backend/.pytest_cache/
+.pytest_cache/

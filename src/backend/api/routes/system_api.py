@@ -2,394 +2,271 @@
 System and administrative API endpoints
 """
 
-import json
+from __future__ import annotations
+
 import logging
 import platform
-import psutil
+import shutil
 import sys
-from datetime import datetime
-from typing import Dict, List, Any, Optional
-from fastapi import APIRouter, HTTPException
+import time
+from collections import deque
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from config.settings import get_settings
+from api.dependencies import ServiceContainer, get_container
+from services.common import utc_now_iso
+from services.optional_deps import psutil, ml_stack_status
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Pydantic models for request/response
-class SystemInfoResponse(BaseModel):
-    hostname: str
-    platform: str
-    platform_version: str
-    architecture: str
-    processor: str
-    python_version: str
-    total_memory: int
-    available_memory: int
-    cpu_count: int
-    cpu_usage: float
-    disk_usage: Dict[str, int]
-    network_info: Dict[str, Any]
-    timestamp: str
+_PROCESS_STARTED = time.time()
+_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
 
 class ServiceStatusResponse(BaseModel):
     services: Dict[str, Dict[str, Any]]
     overall_status: str
     timestamp: str
 
+
 class ConfigResponse(BaseModel):
     config: Dict[str, Any]
     timestamp: str
 
+
 class LogResponse(BaseModel):
     logs: List[Dict[str, Any]]
     total_count: int
+    log_file: Optional[str]
     timestamp: str
 
-class HealthCheckResponse(BaseModel):
-    status: str
-    timestamp: str
-    services: Dict[str, str]
-    metrics: Dict[str, Any]
 
-# Settings
-settings = get_settings()
+def _memory() -> Dict[str, Any]:
+    if psutil is None:
+        return {"available": False}
+    vm = psutil.virtual_memory()
+    return {"available": True, "total": vm.total, "available_bytes": vm.available, "used": vm.used, "percent": vm.percent}
 
-@router.get("/system-info", response_model=SystemInfoResponse)
-async def get_system_info():
-    """
-    Get detailed system information
-    """
+
+def _disk(path: Path) -> Dict[str, Any]:
     try:
-        logger.info("Getting system information")
+        usage = shutil.disk_usage(path)
+    except OSError:
+        return {}
+    return {"total": usage.total, "used": usage.used, "free": usage.free, "percent": round(usage.used / usage.total * 100, 2) if usage.total else 0.0}
 
-        # Get system information
-        system_info = {
-            "hostname": platform.node(),
-            "platform": platform.system(),
-            "platform_version": platform.version(),
-            "architecture": platform.machine(),
-            "processor": platform.processor(),
-            "python_version": sys.version,
-            "total_memory": psutil.virtual_memory().total,
-            "available_memory": psutil.virtual_memory().available,
-            "cpu_count": psutil.cpu_count(),
-            "cpu_usage": psutil.cpu_percent(interval=1),
-            "disk_usage": {
-                "total": psutil.disk_usage('/').total,
-                "used": psutil.disk_usage('/').used,
-                "free": psutil.disk_usage('/').free
-            },
-            "network_info": {
-                "interfaces": psutil.net_if_addrs(),
-                "io_counters": psutil.net_io_counters()._asdict() if psutil.net_io_counters() else {}
-            },
-            "timestamp": datetime.utcnow().isoformat()
-        }
 
-        return SystemInfoResponse(**system_info)
+def _service_states(container: ServiceContainer) -> Dict[str, Dict[str, Any]]:
+    ai = container.ai_service
+    return {
+        "ai_service": {**ai.status(), "description": "Symbolic solver (SymPy) with optional Qwen3-Omni reasoning"},
+        "audio_service": {
+            "initialized": container.audio_service.is_initialized,
+            "healthy": container.audio_service.is_healthy(),
+            "stt_available": bool(getattr(container.audio_service, "meralion_service", None)),
+            "tts_available": bool(getattr(container.audio_service, "vibevoice_service", None)),
+            "description": "Speech recognition and text-to-speech (models load on demand)",
+        },
+        "drawing_service": {
+            "initialized": container.drawing_service.is_initialized,
+            "healthy": container.drawing_service.is_healthy(),
+            "description": "Canvas analysis and stroke geometry",
+        },
+        "model_service": {
+            "initialized": container.model_service.is_initialized,
+            "healthy": container.model_service.is_healthy(),
+            "loaded_models": list(getattr(container.model_service, "models", {}).keys()),
+            "description": "Model download/load management",
+        },
+        "knowledge_service": {
+            **container.knowledge_service.status(),
+            "healthy": container.knowledge_service.is_healthy(),
+            "description": "Course-material embedding index (Chroma)",
+        },
+        "practice_service": {
+            **container.practice_service.status(),
+            "healthy": container.practice_service.is_healthy(),
+            "description": "Word-problem generation, answer checking and hints",
+        },
+        "websocket": {
+            "healthy": True,
+            "active_connections": container.websocket_manager.get_connection_count(),
+            "clients": container.websocket_manager.get_all_connections(),
+        },
+    }
 
-    except Exception as e:
-        logger.error(f"Error getting system info: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get system info: {str(e)}")
+
+@router.get("/status")
+async def system_status(container: ServiceContainer = Depends(get_container)):
+    """Detailed status used by the desktop UI to decide what to enable."""
+    return {
+        "status": "running",
+        "timestamp": utc_now_iso(),
+        "version": container.settings.version,
+        "services": _service_states(container),
+        "ml_stack": ml_stack_status(),
+        "ui_ready": True,
+        "architecture": "lazy_loading",
+        "uptime_seconds": round(time.time() - _PROCESS_STARTED, 1),
+    }
+
 
 @router.get("/service-status", response_model=ServiceStatusResponse)
-async def get_service_status():
-    """
-    Get status of all backend services
-    """
-    try:
-        logger.info("Getting service status")
+async def get_service_status(container: ServiceContainer = Depends(get_container)):
+    services = _service_states(container)
+    healthy = all(s.get("healthy", True) for s in services.values())
+    return ServiceStatusResponse(services=services, overall_status="healthy" if healthy else "degraded", timestamp=utc_now_iso())
 
-        # This is a placeholder implementation
-        # In production, you would check actual service statuses
-        services = {
-            "ai_service": {
-                "status": "running",
-                "memory_usage": "512MB",
-                "cpu_usage": "15%",
-                "last_check": datetime.utcnow().isoformat()
-            },
-            "audio_service": {
-                "status": "running",
-                "memory_usage": "256MB",
-                "cpu_usage": "5%",
-                "last_check": datetime.utcnow().isoformat()
-            },
-            "drawing_service": {
-                "status": "running",
-                "memory_usage": "128MB",
-                "cpu_usage": "3%",
-                "last_check": datetime.utcnow().isoformat()
-            },
-            "model_service": {
-                "status": "running",
-                "memory_usage": "2048MB",
-                "cpu_usage": "25%",
-                "last_check": datetime.utcnow().isoformat()
-            },
-            "database": {
-                "status": "connected",
-                "connection_pool_size": 10,
-                "active_connections": 2,
-                "last_check": datetime.utcnow().isoformat()
-            }
-        }
 
-        # Determine overall status
-        all_running = all(service["status"] == "running" for service in services.values())
-        overall_status = "healthy" if all_running else "degraded"
+@router.get("/system-info")
+async def get_system_info(container: ServiceContainer = Depends(get_container)):
+    return {
+        "hostname": platform.node(),
+        "platform": platform.system(),
+        "platform_version": platform.version(),
+        "architecture": platform.machine(),
+        "processor": platform.processor(),
+        "python_version": sys.version.split()[0],
+        "cpu_count": psutil.cpu_count() if psutil else None,
+        "cpu_usage": psutil.cpu_percent(interval=None) if psutil else None,
+        "memory": _memory(),
+        "disk_usage": _disk(container.settings.model_dir),
+        "ml_stack": ml_stack_status(),
+        "timestamp": utc_now_iso(),
+    }
 
-        return ServiceStatusResponse(
-            services=services,
-            overall_status=overall_status,
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    except Exception as e:
-        logger.error(f"Error getting service status: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get service status: {str(e)}")
 
 @router.get("/config", response_model=ConfigResponse)
-async def get_config():
-    """
-    Get current configuration (sensitive information filtered)
-    """
-    try:
-        logger.info("Getting configuration")
+async def get_config(container: ServiceContainer = Depends(get_container)):
+    s = container.settings
+    safe_config = {
+        "app_name": s.app_name,
+        "version": s.version,
+        "debug": s.debug,
+        "environment": s.environment,
+        "host": s.host,
+        "port": s.port,
+        "ai_model_name": s.ai_model_name,
+        "ai_temperature": s.ai_temperature,
+        "ai_max_tokens": s.ai_max_tokens,
+        "ai_use_gpu": s.ai_use_gpu,
+        "ai_device": s.ai_device,
+        "preload_models": s.preload_models,
+        "whisper_model": s.whisper_model,
+        "tts_model": s.tts_model,
+        "log_level": s.log_level,
+        "max_upload_size": s.max_upload_size,
+        "max_websocket_message_bytes": s.max_websocket_message_bytes,
+        "solver_timeout_seconds": s.solver_timeout_seconds,
+        "websocket_ping_interval": s.websocket_ping_interval,
+        "model_dir": str(s.model_dir),
+    }
+    return ConfigResponse(config=safe_config, timestamp=utc_now_iso())
 
-        # Get safe configuration (filter sensitive information)
-        safe_config = {
-            "app_name": settings.app_name,
-            "version": settings.version,
-            "debug": settings.debug,
-            "environment": settings.environment,
-            "host": settings.host,
-            "port": settings.port,
-            "ai_model_name": settings.ai_model_name,
-            "ai_temperature": settings.ai_temperature,
-            "ai_max_tokens": settings.ai_max_tokens,
-            "ai_use_gpu": settings.ai_use_gpu,
-            "whisper_model": settings.whisper_model,
-            "tts_model": settings.tts_model,
-            "log_level": settings.log_level,
-            "max_upload_size": settings.max_upload_size,
-            "max_concurrent_requests": settings.max_concurrent_requests,
-            "websocket_ping_interval": settings.websocket_ping_interval,
-        }
 
-        return ConfigResponse(
-            config=safe_config,
-            timestamp=datetime.utcnow().isoformat()
-        )
+def _parse_log_line(line: str) -> Dict[str, Any]:
+    # Format produced by main.configure_logging: "<asctime> <LEVEL> <name>: <message>"
+    parts = line.rstrip("\n").split(" ", 3)
+    if len(parts) == 4 and parts[2] in _LOG_LEVELS:
+        return {"timestamp": f"{parts[0]} {parts[1]}", "level": parts[2], "service": parts[3].split(":", 1)[0], "message": parts[3].split(":", 1)[-1].strip()}
+    return {"timestamp": None, "level": "INFO", "service": None, "message": line.rstrip("\n")}
 
-    except Exception as e:
-        logger.error(f"Error getting config: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get config: {str(e)}")
 
 @router.get("/logs", response_model=LogResponse)
 async def get_logs(
     limit: int = 100,
     offset: int = 0,
     level: Optional[str] = None,
-    service: Optional[str] = None
+    service: Optional[str] = None,
+    container: ServiceContainer = Depends(get_container),
 ):
-    """
-    Get application logs
-    """
-    try:
-        logger.info("Getting application logs")
+    """Tail the real backend log file."""
+    limit = max(1, min(limit, 1000))
+    log_path = container.settings.log_path
+    if not log_path.exists():
+        return LogResponse(logs=[], total_count=0, log_file=str(log_path), timestamp=utc_now_iso())
 
-        # This is a placeholder implementation
-        # In production, you would read from actual log files or database
-        logs = []
+    # Read only the tail of the file; logs can be large.
+    window: deque = deque(maxlen=offset + limit + 5000)
+    with log_path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            window.append(line)
+    entries = [_parse_log_line(line) for line in reversed(window)]
+    if level:
+        entries = [e for e in entries if e["level"] == level.upper()]
+    if service:
+        entries = [e for e in entries if e["service"] and service in e["service"]]
+    return LogResponse(logs=entries[offset : offset + limit], total_count=len(entries), log_file=str(log_path), timestamp=utc_now_iso())
 
-        # Simulate some log entries
-        for i in range(min(limit, 50)):
-            log_entry = {
-                "timestamp": (datetime.utcnow().timestamp() - i * 60) * 1000,  # milliseconds
-                "level": ["INFO", "WARNING", "ERROR"][i % 3],
-                "service": ["ai_service", "audio_service", "drawing_service"][i % 3],
-                "message": f"Sample log message {i}",
-                "source": "system_api.py"
-            }
-            logs.append(log_entry)
 
-        # Filter by level if specified
-        if level:
-            logs = [log for log in logs if log["level"] == level]
+@router.get("/health")
+async def detailed_health(container: ServiceContainer = Depends(get_container)):
+    services = _service_states(container)
+    mem = _memory()
+    return {
+        "status": "healthy" if all(s.get("healthy", True) for s in services.values()) else "degraded",
+        "timestamp": utc_now_iso(),
+        "services": {name: ("healthy" if s.get("healthy", True) else "unhealthy") for name, s in services.items()},
+        "metrics": {
+            "memory_usage_percent": mem.get("percent"),
+            "cpu_usage_percent": psutil.cpu_percent(interval=None) if psutil else None,
+            "uptime_seconds": round(time.time() - _PROCESS_STARTED, 1),
+            "active_connections": container.websocket_manager.get_connection_count(),
+            "problems_solved": container.ai_service.get_statistics()["total_problems_solved"],
+        },
+    }
 
-        # Filter by service if specified
-        if service:
-            logs = [log for log in logs if log["service"] == service]
-
-        # Apply pagination
-        total_count = len(logs)
-        logs = logs[offset:offset + limit]
-
-        return LogResponse(
-            logs=logs,
-            total_count=total_count,
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    except Exception as e:
-        logger.error(f"Error getting logs: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get logs: {str(e)}")
-
-@router.get("/health", response_model=HealthCheckResponse)
-async def health_check():
-    """
-    Comprehensive health check for monitoring
-    """
-    try:
-        logger.info("Performing health check")
-
-        # Check system resources
-        memory = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
-
-        # Service health (placeholder)
-        services = {
-            "ai_service": "healthy",
-            "audio_service": "healthy",
-            "drawing_service": "healthy",
-            "model_service": "healthy",
-            "database": "healthy",
-            "websocket": "healthy"
-        }
-
-        # Determine overall health
-        all_healthy = all(status == "healthy" for status in services.values())
-        overall_status = "healthy" if all_healthy else "unhealthy"
-
-        # System metrics
-        metrics = {
-            "memory_usage_percent": memory.percent,
-            "disk_usage_percent": (disk.used / disk.total) * 100,
-            "cpu_usage_percent": psutil.cpu_percent(interval=1),
-            "uptime_seconds": datetime.utcnow().timestamp() - psutil.boot_time(),
-            "active_connections": 0,  # Would get actual count in production
-            "request_count": 0,  # Would track actual requests in production
-        }
-
-        return HealthCheckResponse(
-            status=overall_status,
-            timestamp=datetime.utcnow().isoformat(),
-            services=services,
-            metrics=metrics
-        )
-
-    except Exception as e:
-        logger.error(f"Error during health check: {e}")
-        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
-
-@router.post("/restart-service")
-async def restart_service(service_name: str):
-    """
-    Restart a specific service (admin only)
-    """
-    try:
-        logger.info(f"Restarting service: {service_name}")
-
-        # This is a placeholder implementation
-        # In production, you would implement actual service restart logic
-
-        valid_services = ["ai_service", "audio_service", "drawing_service", "model_service"]
-        if service_name not in valid_services:
-            raise HTTPException(status_code=400, detail=f"Invalid service name: {service_name}")
-
-        # Simulate service restart
-        await asyncio.sleep(1)  # Simulate restart time
-
-        return {
-            "message": f"Service {service_name} restarted successfully",
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error restarting service {service_name}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to restart service: {str(e)}")
 
 @router.get("/metrics")
-async def get_metrics():
-    """
-    Get system and application metrics for monitoring
-    """
+async def get_metrics(container: ServiceContainer = Depends(get_container)):
+    return {
+        "system": {
+            "cpu_percent": psutil.cpu_percent(interval=None) if psutil else None,
+            "memory": _memory(),
+            "disk": _disk(container.settings.model_dir),
+        },
+        "application": {
+            "uptime_seconds": round(time.time() - _PROCESS_STARTED, 1),
+            "websocket_connections": container.websocket_manager.get_connection_count(),
+            **container.ai_service.get_statistics(),
+        },
+        "timestamp": utc_now_iso(),
+    }
+
+
+@router.post("/restart-service")
+async def restart_service(service_name: str, container: ServiceContainer = Depends(get_container)):
+    """Re-initialise one service in place (releases and recreates its resources)."""
+    services = {
+        "ai_service": container.ai_service,
+        "audio_service": container.audio_service,
+        "drawing_service": container.drawing_service,
+        "model_service": container.model_service,
+    }
+    service = services.get(service_name)
+    if service is None:
+        raise HTTPException(status_code=400, detail=f"Invalid service name: {service_name}")
     try:
-        logger.info("Getting metrics")
+        await service.cleanup()
+        await service.initialize()
+    except Exception as exc:
+        logger.exception("Restart of %s failed", service_name)
+        raise HTTPException(status_code=500, detail=f"Failed to restart {service_name}: {exc}") from exc
+    return {"message": f"Service {service_name} restarted", "timestamp": utc_now_iso()}
 
-        # System metrics
-        memory = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
-        network = psutil.net_io_counters()
-
-        metrics = {
-            "system": {
-                "cpu_percent": psutil.cpu_percent(interval=1),
-                "memory_percent": memory.percent,
-                "memory_used": memory.used,
-                "memory_total": memory.total,
-                "disk_percent": (disk.used / disk.total) * 100,
-                "disk_used": disk.used,
-                "disk_total": disk.total,
-                "network_bytes_sent": network.bytes_sent if network else 0,
-                "network_bytes_recv": network.bytes_recv if network else 0,
-            },
-            "application": {
-                "uptime_seconds": datetime.utcnow().timestamp() - psutil.boot_time(),
-                "active_requests": 0,  # Would track actual requests
-                "total_requests": 0,  # Would track total requests
-                "error_rate": 0.0,  # Would calculate actual error rate
-                "response_time_avg": 0.0,  # Would track actual response times
-            },
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-        return metrics
-
-    except Exception as e:
-        logger.error(f"Error getting metrics: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get metrics: {str(e)}")
 
 @router.post("/clear-cache")
-async def clear_cache():
-    """
-    Clear application cache
-    """
-    try:
-        logger.info("Clearing application cache")
-
-        # This is a placeholder implementation
-        # In production, you would clear actual cache directories
-
-        import shutil
-        import os
-
-        cache_dirs = [
-            settings.model_cache_dir,
-            Path("temp"),
-            Path("cache")
-        ]
-
-        cleared_dirs = []
-        for cache_dir in cache_dirs:
-            if cache_dir.exists():
-                shutil.rmtree(cache_dir)
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                cleared_dirs.append(str(cache_dir))
-
-        return {
-            "message": "Cache cleared successfully",
-            "cleared_directories": cleared_dirs,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error clearing cache: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
-
-# Import asyncio for the restart service endpoint
-import asyncio
-from pathlib import Path
+async def clear_cache(container: ServiceContainer = Depends(get_container)):
+    """Empty the temp and model-cache directories owned by the backend."""
+    cleared: List[str] = []
+    for cache_dir in (container.settings.temp_dir, container.settings.model_cache_dir):
+        cache_dir = Path(cache_dir)
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cleared.append(str(cache_dir))
+    return {"message": "Cache cleared", "cleared_directories": cleared, "timestamp": utc_now_iso()}

@@ -2,319 +2,212 @@
 Math-related API endpoints
 """
 
+from __future__ import annotations
+
+import base64
 import json
 import logging
-from typing import Dict, List, Any, Optional
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from pydantic import BaseModel
-from datetime import datetime
-import uuid
+from typing import Any, Dict, List, Optional
 
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
+
+from api.dependencies import get_ai_service, get_drawing_service
 from services.ai_service import AIService
-from services.drawing_service import DrawingService
+from services.common import utc_now_iso
+from services.drawing_service import DrawingDecodeError, DrawingService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Pydantic models for request/response
+
 class MathProblemRequest(BaseModel):
-    problem: str
-    problem_type: Optional[str] = "general"
-    context: Optional[Dict[str, Any]] = {}
+    problem: str = Field(min_length=1, max_length=4000)
+    problem_type: Optional[str] = None
+    context: Dict[str, Any] = Field(default_factory=dict)
     enable_step_by_step: bool = True
     enable_explanation: bool = True
+
 
 class MathSolutionResponse(BaseModel):
     id: str
     problem: str
     solution: str
+    solution_latex: str = ""
     steps: List[str]
     confidence: float
     problem_type: str
+    variable: Optional[str] = None
     timestamp: str
     metadata: Dict[str, Any]
 
-class DrawingAnalysisRequest(BaseModel):
-    drawing_data: str  # Base64 encoded image
-    analysis_type: str = "equation_recognition"
-    context: Optional[Dict[str, Any]] = {}
 
-class DrawingAnalysisResponse(BaseModel):
-    id: str
-    recognized_text: str
-    confidence: float
-    equations: List[Dict[str, Any]]
-    timestamp: str
+class DrawingAnalysisRequest(BaseModel):
+    drawing_data: str = Field(min_length=1)
+    analysis_type: str = "equation_recognition"
+    context: Dict[str, Any] = Field(default_factory=dict)
+
 
 class BatchProblemsRequest(BaseModel):
-    problems: List[str]
-    context: Optional[Dict[str, Any]] = {}
+    problems: List[str] = Field(min_length=1, max_length=50)
+    context: Dict[str, Any] = Field(default_factory=dict)
+
 
 class VerificationRequest(BaseModel):
-    problem: str
-    solution: str
+    problem: str = Field(min_length=1, max_length=4000)
+    solution: str = Field(min_length=1, max_length=4000)
     verification_type: str = "correctness"
+
 
 class VerificationResponse(BaseModel):
     is_correct: bool
     confidence: float
     feedback: str
-    alternative_solutions: List[str]
+    expected: Optional[str] = None
+    expected_steps: List[str] = Field(default_factory=list)
+    alternative_solutions: List[str] = Field(default_factory=list)
 
-# Initialize services
-ai_service = AIService()
-drawing_service = DrawingService()
+
+def _to_solution_response(problem: str, solution: Dict[str, Any]) -> MathSolutionResponse:
+    return MathSolutionResponse(
+        id=solution["id"],
+        problem=problem,
+        solution=solution["solution"],
+        solution_latex=solution.get("solution_latex", ""),
+        steps=solution.get("steps", []),
+        confidence=solution.get("confidence", 0.0),
+        problem_type=solution.get("problem_type", "unknown"),
+        variable=solution.get("variable"),
+        timestamp=solution.get("timestamp", utc_now_iso()),
+        metadata={
+            "processing_time": solution.get("processing_time", 0.0),
+            "model_used": solution.get("model_used", "none"),
+            "tokens_used": solution.get("tokens_used", 0),
+            "verification": solution.get("verification", {}),
+        },
+    )
+
 
 @router.post("/solve", response_model=MathSolutionResponse)
-async def solve_math_problem(request: MathProblemRequest):
-    """
-    Solve a mathematical problem using AI
-    """
+async def solve_math_problem(request: MathProblemRequest, ai: AIService = Depends(get_ai_service)):
+    context = dict(request.context)
+    context.setdefault("enable_step_by_step", request.enable_step_by_step)
     try:
-        logger.info(f"Solving math problem: {request.problem[:100]}...")
+        solution = await ai.solve_math_problem(request.problem, context)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Solve failed")
+        raise HTTPException(status_code=500, detail=f"Failed to solve math problem: {exc}") from exc
+    return _to_solution_response(request.problem, solution)
 
-        # Get solution from AI service
-        solution = await ai_service.solve_math_problem(
-            request.problem,
-            request.context
-        )
-
-        return MathSolutionResponse(
-            id=str(uuid.uuid4()),
-            problem=request.problem,
-            solution=solution["solution"],
-            steps=solution.get("steps", []),
-            confidence=solution.get("confidence", 0.0),
-            problem_type=request.problem_type,
-            timestamp=datetime.utcnow().isoformat(),
-            metadata={
-                "processing_time": solution.get("processing_time", 0),
-                "model_used": solution.get("model_used", "default"),
-                "tokens_used": solution.get("tokens_used", 0)
-            }
-        )
-
-    except Exception as e:
-        logger.error(f"Error solving math problem: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to solve math problem: {str(e)}")
-
-@router.post("/analyze-drawing", response_model=DrawingAnalysisResponse)
-async def analyze_drawing(request: DrawingAnalysisRequest):
-    """
-    Analyze a drawing for mathematical content
-    """
-    try:
-        logger.info(f"Analyzing drawing of type: {request.analysis_type}")
-
-        # Process drawing data
-        analysis = await drawing_service.analyze_drawing(
-            request.drawing_data,
-            request.analysis_type,
-            request.context
-        )
-
-        return DrawingAnalysisResponse(
-            id=str(uuid.uuid4()),
-            recognized_text=analysis["recognized_text"],
-            confidence=analysis["confidence"],
-            equations=analysis.get("equations", []),
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    except Exception as e:
-        logger.error(f"Error analyzing drawing: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to analyze drawing: {str(e)}")
 
 @router.post("/batch-solve")
-async def solve_batch_problems(request: BatchProblemsRequest):
-    """
-    Solve multiple math problems in batch
-    """
+async def solve_batch_problems(request: BatchProblemsRequest, ai: AIService = Depends(get_ai_service)):
+    solutions = []
+    for problem in request.problems:
+        try:
+            solution = await ai.solve_math_problem(problem, dict(request.context))
+            solutions.append({"problem": problem, "solution": solution, "status": "success"})
+        except Exception as exc:
+            logger.warning("Batch item failed (%r): %s", problem, exc)
+            solutions.append({"problem": problem, "error": str(exc), "status": "failed"})
+    return {
+        "solutions": solutions,
+        "total_problems": len(request.problems),
+        "successful_solutions": sum(1 for s in solutions if s["status"] == "success"),
+        "timestamp": utc_now_iso(),
+    }
+
+
+@router.post("/verify", response_model=VerificationResponse)
+async def verify_solution(request: VerificationRequest, ai: AIService = Depends(get_ai_service)):
     try:
-        logger.info(f"Solving batch of {len(request.problems)} problems")
+        verdict = await ai.verify_solution(request.problem, request.solution, request.verification_type)
+    except Exception as exc:
+        logger.exception("Verification failed")
+        raise HTTPException(status_code=500, detail=f"Failed to verify solution: {exc}") from exc
+    return VerificationResponse(**{k: v for k, v in verdict.items() if k in VerificationResponse.model_fields})
 
-        solutions = []
-        for problem in request.problems:
-            try:
-                solution = await ai_service.solve_math_problem(
-                    problem,
-                    request.context
-                )
-                solutions.append({
-                    "problem": problem,
-                    "solution": solution,
-                    "status": "success"
-                })
-            except Exception as e:
-                logger.error(f"Error solving problem '{problem}': {e}")
-                solutions.append({
-                    "problem": problem,
-                    "error": str(e),
-                    "status": "failed"
-                })
 
-        return {
-            "solutions": solutions,
-            "total_problems": len(request.problems),
-            "successful_solutions": len([s for s in solutions if s["status"] == "success"]),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error in batch solve: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to solve batch problems: {str(e)}")
-
-@router.post("/verify")
-async def verify_solution(request: VerificationRequest):
-    """
-    Verify if a mathematical solution is correct
-    """
+@router.post("/analyze-drawing")
+async def analyze_drawing(
+    request: DrawingAnalysisRequest,
+    ai: AIService = Depends(get_ai_service),
+    drawing: DrawingService = Depends(get_drawing_service),
+):
     try:
-        logger.info(f"Verifying solution for: {request.problem}")
+        processed = await drawing.process_drawing(request.drawing_data, request.analysis_type, request.context)
+        analysis = await ai.analyze_drawing(request.drawing_data, request.context)
+    except DrawingDecodeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Drawing analysis failed")
+        raise HTTPException(status_code=500, detail=f"Failed to analyze drawing: {exc}") from exc
+    analysis["image_analysis"] = processed["data"]["image_analysis"]
+    analysis["image_dimensions"] = processed["image_dimensions"]
+    return analysis
 
-        verification = await ai_service.verify_solution(
-            request.problem,
-            request.solution,
-            request.verification_type
-        )
-
-        return VerificationResponse(
-            is_correct=verification["is_correct"],
-            confidence=verification["confidence"],
-            feedback=verification["feedback"],
-            alternative_solutions=verification.get("alternative_solutions", [])
-        )
-
-    except Exception as e:
-        logger.error(f"Error verifying solution: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to verify solution: {str(e)}")
 
 @router.post("/upload-image")
 async def upload_and_analyze_image(
     file: UploadFile = File(...),
     analysis_type: str = Form("equation_recognition"),
-    context: str = Form("{}")
+    context: str = Form("{}"),
+    ai: AIService = Depends(get_ai_service),
+    drawing: DrawingService = Depends(get_drawing_service),
 ):
-    """
-    Upload an image for mathematical analysis
-    """
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    image_data = await file.read()
+    if len(image_data) > drawing.settings.max_upload_size:
+        raise HTTPException(status_code=413, detail="Image exceeds the upload size limit")
     try:
-        logger.info(f"Analyzing uploaded image: {file.filename}")
+        context_data = json.loads(context) if context else {}
+    except json.JSONDecodeError:
+        context_data = {}
+    b64 = base64.b64encode(image_data).decode("ascii")
+    try:
+        processed = await drawing.process_drawing(b64, analysis_type, context_data)
+        analysis = await ai.analyze_drawing(b64, context_data)
+    except DrawingDecodeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    analysis["image_analysis"] = processed["data"]["image_analysis"]
+    return {"filename": file.filename, "analysis": analysis, "timestamp": utc_now_iso()}
 
-        # Validate file
-        if not file.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail="File must be an image")
-
-        # Read image data
-        image_data = await file.read()
-
-        # Convert to base64 for processing
-        import base64
-        base64_image = base64.b64encode(image_data).decode('utf-8')
-
-        # Parse context
-        try:
-            context_data = json.loads(context)
-        except:
-            context_data = {}
-
-        # Analyze image
-        analysis = await drawing_service.analyze_drawing(
-            base64_image,
-            analysis_type,
-            context_data
-        )
-
-        return {
-            "filename": file.filename,
-            "analysis": analysis,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error analyzing uploaded image: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to analyze image: {str(e)}")
 
 @router.get("/problem-types")
-async def get_supported_problem_types():
-    """
-    Get list of supported mathematical problem types
-    """
-    try:
-        problem_types = await ai_service.get_supported_problem_types()
-        return {
-            "problem_types": problem_types,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting problem types: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get problem types: {str(e)}")
+async def get_supported_problem_types(ai: AIService = Depends(get_ai_service)):
+    return {"problem_types": await ai.get_supported_problem_types(), "timestamp": utc_now_iso()}
+
 
 @router.get("/history")
 async def get_solution_history(
     limit: int = 50,
     offset: int = 0,
-    problem_type: Optional[str] = None
+    problem_type: Optional[str] = None,
+    ai: AIService = Depends(get_ai_service),
 ):
-    """
-    Get historical solutions (placeholder - would connect to database in production)
-    """
-    try:
-        # This is a placeholder implementation
-        # In production, this would query a database
-        history = []
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    data = ai.get_history(limit=limit, offset=offset, problem_type=problem_type)
+    data["timestamp"] = utc_now_iso()
+    return data
 
-        return {
-            "history": history,
-            "total": 0,
-            "limit": limit,
-            "offset": offset,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error getting solution history: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get solution history: {str(e)}")
 
 @router.delete("/history/{solution_id}")
-async def delete_solution_from_history(solution_id: str):
-    """
-    Delete a solution from history (placeholder)
-    """
-    try:
-        # This is a placeholder implementation
-        # In production, this would delete from database
-        logger.info(f"Deleting solution {solution_id} from history")
+async def delete_solution_from_history(solution_id: str, ai: AIService = Depends(get_ai_service)):
+    if not ai.delete_history_item(solution_id):
+        raise HTTPException(status_code=404, detail="Solution not found in history")
+    return {"message": f"Solution {solution_id} deleted", "timestamp": utc_now_iso()}
 
-        return {
-            "message": f"Solution {solution_id} deleted successfully",
-            "timestamp": datetime.utcnow().isoformat()
-        }
 
-    except Exception as e:
-        logger.error(f"Error deleting solution from history: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete solution: {str(e)}")
+@router.delete("/history")
+async def clear_solution_history(ai: AIService = Depends(get_ai_service)):
+    ai.clear_history()
+    return {"message": "History cleared", "timestamp": utc_now_iso()}
+
 
 @router.get("/statistics")
-async def get_math_statistics():
-    """
-    Get usage statistics (placeholder)
-    """
-    try:
-        # This is a placeholder implementation
-        # In production, this would query analytics database
-        statistics = {
-            "total_problems_solved": 0,
-            "average_confidence": 0.0,
-            "popular_problem_types": [],
-            "daily_usage": []
-        }
-
-        return {
-            "statistics": statistics,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error getting statistics: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get statistics: {str(e)}")
+async def get_math_statistics(ai: AIService = Depends(get_ai_service)):
+    return {"statistics": ai.get_statistics(), "timestamp": utc_now_iso()}

@@ -1,344 +1,766 @@
-import React, { useState, useRef, useEffect } from 'react';
-import {
-  Box,
-  Paper,
-  Typography,
-  Button,
-  IconButton,
-  Divider,
-  CircularProgress,
-  TextField,
-  Menu,
-  MenuItem,
-} from '@mui/material';
-import {
-  Send,
-  Mic,
-  Image,
-  Save,
-  Clear,
-  Undo,
-  Redo,
-  Functions,
-  FormatBold,
-  GridOn,
-} from '@mui/icons-material';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { Box, Button, IconButton, Menu, MenuItem, Paper, Stack, ToggleButton, Tooltip, Typography } from '@mui/material';
+import { CheckCircleOutline, FactCheck, Image as ImageIcon, Mic, Save, School, Stop } from '@mui/icons-material';
 import { styled } from '@mui/material/styles';
-import { DrawingCanvas, DrawingCanvasRef } from '../components/DrawingCanvas';
+import { DrawingCanvas, DrawingCanvasRef, DrawingTool } from '../components/DrawingCanvas';
+import { TOOL_HOTKEYS, WhiteboardToolbar } from '../components/WhiteboardToolbar';
 import { ChatInterface } from '../components/ChatInterface';
 import { MathInput } from '../components/MathInput';
-import { useWebSocket } from '../hooks/useWebSocket';
-import { useAppSettings } from '../hooks/useAppSettings';
-import { MathSolution } from '../types/MathTypes';
+import { PracticeDecks } from '../components/PracticeDecks';
+import { useWebSocketContext } from '../contexts/WebSocketContext';
+import { useSettingsContext } from '../contexts/SettingsContext';
+import { WebSocketRequestError } from '../hooks/useWebSocket';
+import { ApiError, apiFetch, apiJson } from '../lib/backend';
+import type { BoardReading, ChatMessage, ChatMessageInput, PracticeCheck, PracticeHistory, PracticeProblem, PracticeSolution, UserInputSource } from '../types/MathTypes';
+import type { BackendSolution, BackendVerification, DrawingAnalysis } from '../types/protocol';
+import { toBackendStyle } from '../lib/vark';
 
-const MainContent = styled(Box)(({ theme }) => ({
+const Layout = styled(Box)(({ theme }) => ({
   display: 'flex',
   height: '100%',
   gap: theme.spacing(2),
+  [theme.breakpoints.down('md')]: { flexDirection: 'column' },
 }));
 
-const CanvasSection = styled(Paper)(({ theme }) => ({
+const CanvasPane = styled(Paper)(({ theme }) => ({
   flex: 1,
-  display: 'flex',
-  flexDirection: 'column',
-  padding: theme.spacing(2),
+  minWidth: 0,
   minHeight: 0,
-}));
-
-const ChatSection = styled(Paper)(({ theme }) => ({
-  width: 400,
   display: 'flex',
   flexDirection: 'column',
   padding: theme.spacing(2),
-  [theme.breakpoints.down('md')]: {
-    width: 300,
-  },
 }));
 
-const ToolBar = styled(Box)(({ theme }) => ({
+const ACTIVE_PROBLEM_KEY = 'mathTutorActiveProblem';
+
+const ChatPane = styled(Paper)(({ theme }) => ({
+  width: 420,
+  minHeight: 0,
   display: 'flex',
-  gap: theme.spacing(1),
-  marginBottom: theme.spacing(2),
-  padding: theme.spacing(1),
-  backgroundColor: theme.palette.grey[100],
-  borderRadius: theme.shape.borderRadius,
-  flexWrap: 'wrap',
+  flexDirection: 'column',
+  padding: theme.spacing(2),
+  [theme.breakpoints.down('lg')]: { width: 360 },
+  [theme.breakpoints.down('md')]: { width: '100%', flex: 1 },
 }));
+
+/** Router state accepted by this page (sent from the Practice page). */
+export interface WhiteboardHandoff {
+  problemId?: string;
+  /** @deprecated kept so older hand-offs still land; the problem now lives in the decks. */
+  whiteboardText?: string;
+  prefillInput?: string;
+}
+
+const newId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+const now = () => new Date().toISOString();
+
+const isTypingTarget = (target: EventTarget | null) => {
+  const el = target as HTMLElement | null;
+  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+};
+
+const HOTKEY_TO_TOOL = Object.fromEntries(Object.entries(TOOL_HOTKEYS).map(([tool, key]) => [key.toLowerCase(), tool])) as Record<string, DrawingTool>;
+
+const describeError = (error: unknown): { text: string; code?: string } => {
+  if (error instanceof WebSocketRequestError) return { text: error.message, code: error.code };
+  if (error instanceof ApiError) return { text: error.message, code: `HTTP ${error.status}` };
+  if (error instanceof Error) return { text: error.message };
+  return { text: String(error) };
+};
 
 export const MathTutorPage: React.FC = () => {
-  const [activeTool, setActiveTool] = useState<'pen' | 'eraser' | 'text' | 'shape'>('pen');
-  const [color] = useState('#000000');
-  const [lineWidth] = useState(2);
-  const [textInput, setTextInput] = useState('');
-  const [mathInput, setMathInput] = useState('');
+  const { connectionStatus, capabilities, request, subscribe } = useWebSocketContext();
+  const { settings, updateWhiteboardSettings } = useSettingsContext();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { whiteboardSettings } = settings;
+
+  const [tool, setTool] = useState<DrawingTool>('pen');
+  const color = whiteboardSettings.penColor;
+  const lineWidth = whiteboardSettings.penWidth;
+  const setColor = (penColor: string) => void updateWhiteboardSettings({ penColor });
+  const setLineWidth = (penWidth: number) => void updateWhiteboardSettings({ penWidth });
+  const [history, setHistory] = useState({ canUndo: false, canRedo: false });
+  const [canvasEmpty, setCanvasEmpty] = useState(true);
+  const [hasSelection, setHasSelection] = useState(false);
+
+  const [input, setInput] = useState('');
+  const [verifyMode, setVerifyMode] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [solutions, setSolutions] = useState<MathSolution[]>([]);
-  const [currentSolution, setCurrentSolution] = useState<MathSolution | null>(null);
-  const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
+  const [exportAnchor, setExportAnchor] = useState<null | HTMLElement>(null);
+  const [recording, setRecording] = useState(false);
+
+  const [session, setSession] = useState<PracticeProblem | null>(null);
+  const [sessionHints, setSessionHints] = useState<string[]>([]);
+  const [sessionAnswer, setSessionAnswer] = useState('');
+  const [sessionCheck, setSessionCheck] = useState<PracticeCheck | null>(null);
+  const [sessionSolution, setSessionSolution] = useState<PracticeSolution | null>(null);
+  const [showEquation, setShowEquation] = useState(false);
+  const [showSketch, setShowSketch] = useState(false);
+  const [sessionChecking, setSessionChecking] = useState(false);
+  const [reading, setReading] = useState<BoardReading | null>(null);
+  const [readingBusy, setReadingBusy] = useState(false);
+  const [objectCount, setObjectCount] = useState(0);
+  const [boardReady, setBoardReady] = useState(false);
 
   const canvasRef = useRef<DrawingCanvasRef>(null);
-  const { sendMessage, connectionStatus } = useWebSocket();
+  const readTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    // Initialize canvas settings
-    if (canvasRef.current) {
-      canvasRef.current.setDrawingMode(true);
+  const lastSolution = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m = messages[i];
+      if (m.kind === 'solution' && m.solution.confidence > 0) return m.solution;
     }
+    return null;
+  }, [messages]);
+
+  const push = useCallback((message: ChatMessageInput) => {
+    setMessages((prev) => [...prev, { ...message, id: newId(), timestamp: now() } as ChatMessage]);
   }, []);
 
-  const handleSendMessage = async () => {
-    if (!textInput.trim() && !mathInput.trim()) return;
+  const pushError = useCallback((error: unknown) => push({ kind: 'error', ...describeError(error) }), [push]);
 
-    const message = {
-      type: 'math_input',
-      content: textInput || mathInput,
-      timestamp: new Date().toISOString(),
-      metadata: {
-        tool: activeTool,
-        canvasData: canvasRef.current?.toDataURL(),
-      },
-    };
+  // ---- backend calls -------------------------------------------------
 
-    setIsProcessing(true);
-    try {
-      sendMessage(message);
-
-      // Simulate AI response (will be replaced with actual backend integration)
-      setTimeout(() => {
-        const solution: MathSolution = {
-          id: Date.now().toString(),
-          problem: textInput || mathInput,
-          solution: generateMockSolution(textInput || mathInput),
-          steps: generateMockSteps(textInput || mathInput),
-          confidence: 0.85,
-          timestamp: new Date().toISOString(),
+  const solve = useCallback(
+    async (problem: string, source: UserInputSource = 'text') => {
+      const content = problem.trim();
+      if (!content) return;
+      push({ kind: 'user', text: content, source });
+      setIsProcessing(true);
+      try {
+        const metadata = {
+          enable_tts: settings.audioSettings.enableTextToSpeech,
+          source,
+          enable_step_by_step: settings.displaySettings.showStepByStep,
+          enable_thinking: settings.modelSettings.enableThinking,
+          temperature: settings.modelSettings.temperature,
+          max_tokens: settings.modelSettings.maxTokens,
+          learning_style: toBackendStyle(settings.learningStyle),
         };
-
-        setCurrentSolution(solution);
-        setSolutions(prev => [solution, ...prev]);
+        let solution: BackendSolution;
+        if (connectionStatus === 'connected') {
+          const reply = await request({ type: 'math_input', content, metadata }, 'math_solution');
+          solution = reply.solution;
+        } else {
+          // REST fallback keeps the app usable while the socket reconnects.
+          solution = await apiFetch<BackendSolution>('/api/math/solve', {
+            method: 'POST',
+            body: JSON.stringify({ problem: content, context: metadata }),
+          });
+        }
+        push({ kind: 'solution', solution });
+      } catch (error) {
+        pushError(error);
+      } finally {
         setIsProcessing(false);
-        setTextInput('');
-        setMathInput('');
-      }, 2000);
+      }
+    },
+    [
+      connectionStatus,
+      push,
+      pushError,
+      request,
+      settings.audioSettings.enableTextToSpeech,
+      settings.displaySettings.showStepByStep,
+      settings.modelSettings.enableThinking,
+      settings.modelSettings.temperature,
+      settings.modelSettings.maxTokens,
+      settings.learningStyle,
+    ],
+  );
+
+  const verify = useCallback(
+    async (problem: string, proposed: string) => {
+      push({ kind: 'user', text: `Is "${proposed}" correct for ${problem}?`, source: 'text' });
+      setIsProcessing(true);
+      try {
+        let verdict: BackendVerification;
+        if (connectionStatus === 'connected') {
+          verdict = (await request({ type: 'verify', problem, solution: proposed }, 'verification')).data;
+        } else {
+          verdict = await apiFetch<BackendVerification>('/api/math/verify', {
+            method: 'POST',
+            body: JSON.stringify({ problem, solution: proposed }),
+          });
+        }
+        push({ kind: 'verification', problem, proposed, verdict });
+      } catch (error) {
+        pushError(error);
+      } finally {
+        setIsProcessing(false);
+      }
+    },
+    [connectionStatus, push, pushError, request],
+  );
+
+  const analyzeImage = useCallback(
+    async (dataUrl: string, source: 'drawing' | 'image') => {
+      push({ kind: 'user', text: source === 'drawing' ? 'Recognize what I drew' : 'Recognize this image', source });
+      setIsProcessing(true);
+      try {
+        let analysis: DrawingAnalysis;
+        if (connectionStatus === 'connected') {
+          analysis = (await request({ type: 'drawing', data: dataUrl }, 'drawing_analysis', 60_000)).data;
+        } else {
+          analysis = await apiFetch<DrawingAnalysis>('/api/math/analyze-drawing', {
+            method: 'POST',
+            body: JSON.stringify({ drawing_data: dataUrl }),
+          });
+        }
+        push({ kind: 'drawing', analysis });
+        if (analysis.available && analysis.recognized_text) {
+          setInput(analysis.recognized_text);
+        }
+      } catch (error) {
+        pushError(error);
+      } finally {
+        setIsProcessing(false);
+      }
+    },
+    [connectionStatus, push, pushError, request],
+  );
+
+  const handleSend = useCallback(() => {
+    const text = input.trim();
+    if (!text || isProcessing) return;
+    setInput('');
+    if (verifyMode && lastSolution) {
+      setVerifyMode(false);
+      void verify(lastSolution.problem, text);
+    } else {
+      void solve(text, 'text');
+    }
+  }, [input, isProcessing, lastSolution, solve, verify, verifyMode]);
+
+  // ---- voice ---------------------------------------------------------
+
+  const stopRecording = useCallback(() => {
+    recorderRef.current?.stop();
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      push({ kind: 'error', text: 'Microphone access is not available in this environment.' });
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      const chunks: BlobPart[] = [];
+      recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        recorderRef.current = null;
+        setRecording(false);
+        const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(blob);
+        });
+        if (!base64) return;
+        setIsProcessing(true);
+        try {
+          const reply = await request(
+            { type: 'audio', data: base64, language: settings.audioSettings.sttLanguage, format: 'webm' },
+            'audio_transcription',
+            60_000,
+          );
+          if (reply.available && reply.text) {
+            await solve(reply.text, 'voice');
+          } else {
+            push({ kind: 'info', text: reply.message || 'Speech recognition is not available. Load a speech model in Settings.' });
+          }
+        } catch (error) {
+          pushError(error);
+        } finally {
+          setIsProcessing(false);
+        }
+      };
+      recorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
     } catch (error) {
-      console.error('Failed to send message:', error);
-      setIsProcessing(false);
+      pushError(error);
     }
-  };
+  }, [push, pushError, request, settings.audioSettings.sttLanguage, solve]);
 
-  const handleCanvasChange = (canvasData: string) => {
-    // Send canvas data to backend for analysis
-    if (connectionStatus === 'connected') {
-      sendMessage({
-        type: 'drawing_update',
-        data: canvasData,
-        timestamp: new Date().toISOString(),
-      });
-    }
-  };
+  const toggleRecording = useCallback(() => {
+    if (recording) stopRecording();
+    else void startRecording();
+  }, [recording, startRecording, stopRecording]);
 
-  const handleVoiceInput = () => {
-    // Voice input will be integrated with Whisper STT
-    console.log('Voice input triggered');
-  };
+  // ---- TTS playback (server pushes audio_response after math_solution) ---
+
+  useEffect(
+    () =>
+      subscribe('audio_response', (message) => {
+        const { audio_data, format } = message.data;
+        if (!audio_data) return;
+        const audio = new Audio(`data:audio/${format || 'wav'};base64,${audio_data}`);
+        audio.volume = settings.audioSettings.volume;
+        audio.play().catch((error) => console.warn('Audio playback failed:', error));
+      }),
+    [subscribe, settings.audioSettings.volume],
+  );
+
+  // ---- image upload ----------------------------------------------------
 
   const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const imageData = e.target?.result as string;
-        // Process image with OCR (will be implemented)
-        console.log('Image uploaded:', imageData);
-      };
-      reader.readAsDataURL(file);
+    event.target.value = '';
+    if (!file) return;
+    if (file.size > 8 * 1024 * 1024) {
+      push({ kind: 'error', text: 'Image is larger than 8 MB.' });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => void analyzeImage(String(reader.result), 'image');
+    reader.onerror = () => push({ kind: 'error', text: 'Could not read that file.' });
+    reader.readAsDataURL(file);
+  };
+
+  // ---- export ----------------------------------------------------------
+
+  const download = async (filename: string, data: string, encoding: 'utf8' | 'base64', mime: string) => {
+    if (window.electronAPI?.saveFile) {
+      await window.electronAPI.saveFile({ defaultPath: filename, data, encoding });
+      return;
+    }
+    const href = encoding === 'base64' ? `data:${mime};base64,${data}` : URL.createObjectURL(new Blob([data], { type: mime }));
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = filename;
+    a.click();
+    if (encoding !== 'base64') URL.revokeObjectURL(href);
+  };
+
+  const transcript = () =>
+    messages
+      .map((m) => {
+        switch (m.kind) {
+          case 'user':
+            return `You: ${m.text}`;
+          case 'solution':
+            return [`Tutor (${m.solution.problem_type}): ${m.solution.solution}`, ...m.solution.steps.map((s, i) => `  ${i + 1}. ${s}`)].join('\n');
+          case 'verification':
+            return `Check: ${m.verdict.feedback}`;
+          case 'drawing':
+            return `Drawing: ${m.analysis.available ? m.analysis.recognized_text : m.analysis.message}`;
+          default:
+            return `${m.kind}: ${m.text}`;
+        }
+      })
+      .join('\n\n');
+
+  const exportAs = async (format: 'txt' | 'png' | 'pdf') => {
+    setExportAnchor(null);
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    try {
+      if (format === 'txt') {
+        await download(`math-tutor-${stamp}.txt`, transcript(), 'utf8', 'text/plain');
+      } else if (format === 'png') {
+        const dataUrl = canvasRef.current?.toDataURL({ multiplier: 2 }) || '';
+        await download(`math-tutor-canvas-${stamp}.png`, dataUrl.split(',')[1] || '', 'base64', 'image/png');
+      } else {
+        const { jsPDF } = await import('jspdf');
+        const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const margin = 40;
+        let y = margin;
+        doc.setFontSize(16);
+        doc.text('AI Math Tutor session', margin, y);
+        y += 24;
+        if (canvasRef.current && !canvasRef.current.isEmpty()) {
+          const canvas = canvasRef.current.getCanvas();
+          const ratio = canvas ? canvas.getHeight() / canvas.getWidth() : 0.6;
+          const imgWidth = pageWidth - margin * 2;
+          const imgHeight = imgWidth * ratio;
+          doc.addImage(canvasRef.current.toDataURL(), 'PNG', margin, y, imgWidth, imgHeight);
+          y += imgHeight + 16;
+        }
+        doc.setFontSize(10);
+        const lines = doc.splitTextToSize(transcript(), pageWidth - margin * 2) as string[];
+        lines.forEach((line) => {
+          if (y > doc.internal.pageSize.getHeight() - margin) {
+            doc.addPage();
+            y = margin;
+          }
+          doc.text(line, margin, y);
+          y += 13;
+        });
+        await download(`math-tutor-${stamp}.pdf`, doc.output('datauristring').split(',')[1], 'base64', 'application/pdf');
+      }
+    } catch (error) {
+      pushError(error);
     }
   };
 
-  const exportSolution = (format: 'pdf' | 'png' | 'txt') => {
-    if (!currentSolution) return;
+  // ---- keyboard shortcuts ---------------------------------------------
 
-    console.log(`Exporting solution as ${format}:`, currentSolution);
-    // Implementation will be added
-  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+      const typing = isTypingTarget(e.target);
+      if (mod) {
+        if (key === 's') {
+          e.preventDefault();
+          void exportAs('txt');
+        } else if (key === 'm') {
+          e.preventDefault();
+          toggleRecording();
+        } else if (!typing) {
+          if (key === 'z' && !e.shiftKey) {
+            e.preventDefault();
+            canvasRef.current?.undo();
+          } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+            e.preventDefault();
+            canvasRef.current?.redo();
+          }
+        }
+        return;
+      }
+      if (typing || e.altKey) return;
+      // Single-key tool switching and deletion, only when focus is not in a text field
+      // (fabric's IText editor uses a hidden textarea, so typing on the canvas is safe too).
+      if ((e.key === 'Delete' || e.key === 'Backspace') && canvasRef.current?.deleteSelection()) {
+        e.preventDefault();
+        return;
+      }
+      if (e.key === 'Escape') {
+        canvasRef.current?.getCanvas()?.discardActiveObject().requestRenderAll();
+        return;
+      }
+      const nextTool = HOTKEY_TO_TOOL[key];
+      if (nextTool) {
+        e.preventDefault();
+        setTool(nextTool);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // exportAs/toggleRecording are stable enough per render; re-binding on every change is cheap.
+  });
 
-  const clearCanvas = () => {
-    if (canvasRef.current) {
-      canvasRef.current.clear();
+  useEffect(() => () => recorderRef.current?.stop(), []);
+
+  const openProblem = useCallback(async (problemId: string, opts?: { restoreBoard?: boolean }) => {
+    try {
+      const next = await apiFetch<PracticeProblem>(`/api/practice/problems/${problemId}`);
+      sessionIdRef.current = next.id;
+      setSession(next);
+      setSessionHints(next.hints);
+      setSessionAnswer(next.last_attempt || '');
+      setSessionCheck(null);
+      setSessionSolution(null);
+      setShowEquation(next.revealed || settings.practiceSettings.showEquationImmediately);
+      setShowSketch(Boolean(next.sketch && settings.learningStyle.visual > 0));
+      localStorage.setItem(ACTIVE_PROBLEM_KEY, next.id);
+      if (opts?.restoreBoard !== false && next.has_whiteboard) {
+        const board = await apiFetch<{ canvas_json: string | null }>(`/api/practice/problems/${next.id}/whiteboard`);
+        if (board.canvas_json) {
+          await canvasRef.current?.loadJSON(board.canvas_json);
+        } else {
+          canvasRef.current?.clear();
+        }
+      } else {
+        canvasRef.current?.clear();
+      }
+    } catch (error) {
+      pushError(error);
     }
-  };
+  }, [pushError, settings.learningStyle.visual, settings.practiceSettings.showEquationImmediately]);
 
-  const generateMockSolution = (problem: string): string => {
-    // Mock solution generation - will be replaced with AI integration
-    const solutions = [
-      `To solve ${problem}, we can use the quadratic formula: x = (-b ± √(b² - 4ac)) / 2a`,
-      `The derivative of ${problem} is 2x + 3`,
-      `The integral of ${problem} is (1/2)x² + 3x + C`,
-      `The solution to ${problem} is x = 5`,
-    ];
-    return solutions[Math.floor(Math.random() * solutions.length)];
-  };
+  const persistBoard = useCallback(() => {
+    const id = sessionIdRef.current;
+    if (!id || canvasRef.current?.isEmpty()) return;
+    const json = canvasRef.current?.toJSON();
+    if (!json) return;
+    void apiJson(`/api/practice/problems/${id}/whiteboard`, 'PUT', { canvas_json: json }).catch(() => undefined);
+  }, []);
 
-  const generateMockSteps = (problem: string): string[] => {
-    // Mock step generation - will be replaced with AI integration
-    return [
-      `Step 1: Identify the variables in ${problem}`,
-      'Step 2: Apply the appropriate mathematical formula',
-      'Step 3: Simplify the expression',
-      'Step 4: Solve for the unknown variable',
-      'Step 5: Verify the solution',
-    ];
-  };
+  const readBoard = useCallback(() => {
+    const readable = canvasRef.current?.getReadable();
+    setObjectCount(readable?.objectCount ?? 0);
+    if (!readable || readable.texts.length === 0) {
+      setReading(null);
+      setReadingBusy(false);
+      return;
+    }
+    setReadingBusy(true);
+    void apiJson<BoardReading>('/api/practice/read-board', 'POST', {
+      texts: readable.texts,
+      problem_id: sessionIdRef.current,
+    })
+      .then(setReading)
+      .catch(() => undefined)
+      .finally(() => setReadingBusy(false));
+  }, []);
+
+  const onCanvasChange = useCallback(
+    ({ isEmpty }: { isEmpty: boolean }) => {
+      setCanvasEmpty(isEmpty);
+      setObjectCount(canvasRef.current?.getReadable().objectCount ?? 0);
+      if (readTimer.current) clearTimeout(readTimer.current);
+      readTimer.current = setTimeout(readBoard, 700);
+      if (sessionIdRef.current) {
+        if (saveTimer.current) clearTimeout(saveTimer.current);
+        saveTimer.current = setTimeout(persistBoard, 1200);
+      }
+    },
+    [persistBoard, readBoard],
+  );
+
+  const sessionHint = useCallback(async () => {
+    if (!session) return;
+    try {
+      const result = await apiJson<{ hints: string[] }>(`/api/practice/problems/${session.id}/hint`, 'POST');
+      setSessionHints(result.hints);
+    } catch (error) {
+      pushError(error);
+    }
+  }, [pushError, session]);
+
+  const sessionReveal = useCallback(async () => {
+    if (!session) return;
+    try {
+      const result = await apiJson<PracticeSolution>(`/api/practice/problems/${session.id}/solution`, 'POST');
+      setSessionSolution(result);
+      setShowEquation(true);
+      setSession((prev) => (prev ? { ...prev, revealed: true } : prev));
+    } catch (error) {
+      pushError(error);
+    }
+  }, [pushError, session]);
+
+  const sessionCheckAnswer = useCallback(async () => {
+    if (!session || !sessionAnswer.trim() || sessionChecking) return;
+    setSessionChecking(true);
+    try {
+      const verdict = await apiJson<PracticeCheck>(`/api/practice/problems/${session.id}/check`, 'POST', { answer: sessionAnswer });
+      setSessionCheck(verdict);
+      setSession((prev) => (prev ? { ...prev, attempts: verdict.attempts, solved: verdict.solved, hints_used: verdict.hints_used } : prev));
+      if (verdict.hint) setSessionHints((h) => (h.includes(verdict.hint as string) ? h : [...h, verdict.hint as string]));
+      if (verdict.correct) setShowEquation(true);
+    } catch (error) {
+      pushError(error);
+    } finally {
+      setSessionChecking(false);
+    }
+  }, [pushError, session, sessionAnswer, sessionChecking]);
+
+  // ---- hand-off from the Practice page, or last opened problem ----------
+
+  useEffect(() => {
+    const state = location.state as WhiteboardHandoff | null;
+    if (state?.problemId) {
+      navigate(location.pathname, { replace: true, state: null });
+      void openProblem(state.problemId);
+      return;
+    }
+    if (state?.whiteboardText || state?.prefillInput) {
+      if (state.prefillInput) setInput(state.prefillInput);
+      navigate(location.pathname, { replace: true, state: null });
+      return;
+    }
+    if (sessionIdRef.current) return;
+    const stored = localStorage.getItem(ACTIVE_PROBLEM_KEY);
+    void apiFetch<PracticeHistory>('/api/practice/history')
+      .then((hist) => {
+        const id = hist.last_opened_id || stored;
+        if (id) return openProblem(id);
+        return undefined;
+      })
+      .catch(() => undefined)
+      .finally(() => setBoardReady(true));
+  }, [location.pathname, location.state, navigate, openProblem]);
+
+  useEffect(() => () => {
+    if (readTimer.current) clearTimeout(readTimer.current);
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    persistBoard();
+  }, [persistBoard]);
+
+  const speechAvailable = Boolean(capabilities?.speech);
+  const recognitionAvailable = Boolean(capabilities?.drawing_recognition);
+  const busy = isProcessing || connectionStatus === 'connecting';
 
   return (
-    <MainContent>
-      {/* Canvas Section */}
-      <CanvasSection elevation={2}>
-        <Typography variant="h6" gutterBottom>
-          Drawing Canvas
-        </Typography>
+    <Layout>
+      <CanvasPane elevation={1}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+          <Typography variant="h6">Whiteboard</Typography>
+          <Stack direction="row" spacing={1} alignItems="center">
+            {whiteboardSettings.showShortcutHints && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: { xs: 'none', lg: 'block' } }}>
+                P/E/V/T/L/R/O tools · Del delete · Ctrl+Z/Y undo/redo · Ctrl+S export · Ctrl+M mic
+              </Typography>
+            )}
+            <Button size="small" startIcon={<School />} onClick={() => navigate('/practice')} sx={{ textTransform: 'none' }}>
+              Practice
+            </Button>
+          </Stack>
+        </Stack>
 
-        <ToolBar>
-          <IconButton
-            color={activeTool === 'pen' ? 'primary' : 'default'}
-            onClick={() => setActiveTool('pen')}
-            title="Pen"
-          >
-            <FormatBold />
-          </IconButton>
+        <WhiteboardToolbar
+          tool={tool}
+          onToolChange={setTool}
+          color={color}
+          onColorChange={setColor}
+          lineWidth={lineWidth}
+          onLineWidthChange={setLineWidth}
+          grid={whiteboardSettings.grid}
+          onGridChange={(grid) => void updateWhiteboardSettings({ grid })}
+          canUndo={history.canUndo}
+          canRedo={history.canRedo}
+          canvasEmpty={canvasEmpty}
+          hasSelection={hasSelection}
+          onUndo={() => canvasRef.current?.undo()}
+          onRedo={() => canvasRef.current?.redo()}
+          onDeleteSelection={() => canvasRef.current?.deleteSelection()}
+          onClear={() => canvasRef.current?.clear()}
+        >
+          <Tooltip title={recognitionAvailable ? 'Recognize the drawing' : 'Handwriting recognition needs the Qwen3-Omni model (see Settings). Sends the canvas to the backend for basic analysis.'}>
+            <span>
+              <IconButton
+                size="small"
+                color={recognitionAvailable ? 'primary' : 'default'}
+                disabled={canvasEmpty || busy}
+                onClick={() => {
+                  const dataUrl = canvasRef.current?.toDataURL();
+                  if (dataUrl) void analyzeImage(dataUrl, 'drawing');
+                }}
+              >
+                <FactCheck fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Tooltip title="Upload an image of a problem">
+            <span>
+              <IconButton size="small" disabled={busy} onClick={() => fileInputRef.current?.click()}>
+                <ImageIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <input ref={fileInputRef} type="file" accept="image/*" hidden onChange={handleImageUpload} />
+          <Tooltip title={speechAvailable ? (recording ? 'Stop recording (Ctrl+M)' : 'Speak your problem (Ctrl+M)') : 'Speech-to-text needs the MERaLiON model (see Settings)'}>
+            <span>
+              <IconButton size="small" color={recording ? 'error' : 'default'} disabled={!speechAvailable || busy} onClick={toggleRecording}>
+                {recording ? <Stop fontSize="small" /> : <Mic fontSize="small" />}
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Tooltip title="Export">
+            <IconButton size="small" onClick={(e) => setExportAnchor(e.currentTarget)}>
+              <Save fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)}>
+            <MenuItem onClick={() => exportAs('txt')} disabled={messages.length === 0}>Transcript as text (Ctrl+S)</MenuItem>
+            <MenuItem onClick={() => exportAs('png')} disabled={canvasEmpty}>Canvas as PNG</MenuItem>
+            <MenuItem onClick={() => exportAs('pdf')} disabled={messages.length === 0 && canvasEmpty}>Canvas + transcript as PDF</MenuItem>
+          </Menu>
+        </WhiteboardToolbar>
 
-          <IconButton
-            color={activeTool === 'eraser' ? 'primary' : 'default'}
-            onClick={() => setActiveTool('eraser')}
-            title="Eraser"
-          >
-            <Clear />
-          </IconButton>
-
-          <IconButton
-            color={activeTool === 'text' ? 'primary' : 'default'}
-            onClick={() => setActiveTool('text')}
-            title="Text"
-          >
-            <Functions />
-          </IconButton>
-
-          <IconButton
-            color={activeTool === 'shape' ? 'primary' : 'default'}
-            onClick={() => setActiveTool('shape')}
-            title="Shapes"
-          >
-            <GridOn />
-          </IconButton>
-
-          <Divider orientation="vertical" flexItem />
-
-          <IconButton onClick={clearCanvas} title="Clear Canvas">
-            <Clear />
-          </IconButton>
-
-          <IconButton onClick={() => canvasRef.current?.undo()} title="Undo">
-            <Undo />
-          </IconButton>
-
-          <IconButton onClick={() => canvasRef.current?.redo()} title="Redo">
-            <Redo />
-          </IconButton>
-
-          <Divider orientation="vertical" flexItem />
-
-          <IconButton onClick={handleVoiceInput} title="Voice Input">
-            <Mic />
-          </IconButton>
-
-          <IconButton component="label" title="Upload Image">
-            <input
-              type="file"
-              accept="image/*"
-              hidden
-              onChange={handleImageUpload}
-            />
-            <Image />
-          </IconButton>
-
-          <IconButton onClick={() => exportSolution('png')} title="Save as Image">
-            <Save />
-          </IconButton>
-        </ToolBar>
-
-        <Box sx={{ flex: 1, border: '1px solid #ddd', borderRadius: 1, overflow: 'hidden' }}>
-          <DrawingCanvas
-            ref={canvasRef}
-            tool={activeTool}
-            color={color}
-            lineWidth={lineWidth}
-            onChange={handleCanvasChange}
+        <Box sx={{ height: { xs: 'auto', md: '34%' }, minHeight: { xs: 220, md: 200 }, maxHeight: { md: 320 }, mb: 1.5, flexShrink: 0 }}>
+          <PracticeDecks
+            problem={session}
+            showEquation={showEquation}
+            onToggleEquation={() => setShowEquation((v) => !v)}
+            showSketch={showSketch}
+            onToggleSketch={() => setShowSketch((v) => !v)}
+            hints={sessionHints}
+            onHint={() => void sessionHint()}
+            onReveal={() => void sessionReveal()}
+            solution={sessionSolution}
+            answer={sessionAnswer}
+            onAnswerChange={setSessionAnswer}
+            onCheck={() => void sessionCheckAnswer()}
+            checking={sessionChecking}
+            lastCheck={sessionCheck}
+            reading={reading}
+            readingBusy={readingBusy}
+            objectCount={objectCount}
+            onGoPractice={() => navigate('/practice')}
           />
         </Box>
-      </CanvasSection>
 
-      {/* Chat Section */}
-      <ChatSection elevation={2}>
+        <Box sx={{ flex: 1, minHeight: 220, border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'hidden' }}>
+          <DrawingCanvas
+            ref={canvasRef}
+            tool={tool}
+            color={color}
+            lineWidth={lineWidth}
+            grid={whiteboardSettings.grid}
+            emptyHint={session ? 'Work it out here. The problem stays in the deck above — use T to type the equation or your answer and it will be read live.' : 'Draw, add text or shapes. Typed math (T tool) is read in the right deck as you write. Open Practice to pin a word problem above the board.'}
+            onChange={onCanvasChange}
+            onHistoryChange={setHistory}
+            onSelectionChange={setHasSelection}
+          />
+        </Box>
+        {boardReady && session && (
+          <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+            Working on saved problem · {session.concept} · drawing is stored with this problem
+          </Typography>
+        )}
+      </CanvasPane>
+
+      <ChatPane elevation={1}>
         <Typography variant="h6" gutterBottom>
-          AI Assistant
+          Tutor
         </Typography>
 
         <ChatInterface
-          solutions={solutions}
-          currentSolution={currentSolution}
+          messages={messages}
           isProcessing={isProcessing}
+          showConfidence={settings.displaySettings.showConfidence}
+          showSteps={settings.displaySettings.showStepByStep}
+          showModelInfo={settings.displaySettings.showModelInfo}
         />
 
-        <Box sx={{ mt: 2 }}>
-          <TextField
-            fullWidth
-            multiline
-            rows={2}
-            variant="outlined"
-            placeholder="Type your math problem or question..."
-            value={textInput}
-            onChange={(e) => setTextInput(e.target.value)}
-            onKeyPress={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSendMessage();
-              }
-            }}
-          />
-
+        <Box sx={{ mt: 1.5 }}>
+          {lastSolution && (
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+              <ToggleButton
+                size="small"
+                value="verify"
+                selected={verifyMode}
+                onChange={() => setVerifyMode((v) => !v)}
+                sx={{ textTransform: 'none', py: 0.25 }}
+              >
+                <CheckCircleOutline fontSize="small" sx={{ mr: 0.5 }} />
+                Check my own answer
+              </ToggleButton>
+              {verifyMode && (
+                <Typography variant="caption" color="text.secondary" noWrap>
+                  for “{lastSolution.problem}”
+                </Typography>
+              )}
+            </Stack>
+          )}
           <MathInput
-            value={mathInput}
-            onChange={setMathInput}
-            onSend={handleSendMessage}
+            value={input}
+            onChange={setInput}
+            onSend={handleSend}
+            disabled={isProcessing}
+            placeholder={verifyMode ? 'Type your answer, e.g. x = 2 or x = 3' : undefined}
           />
-
-          <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
-            <Button
-              variant="contained"
-              endIcon={<Send />}
-              onClick={handleSendMessage}
-              disabled={isProcessing || (!textInput.trim() && !mathInput.trim())}
-              fullWidth
-            >
-              {isProcessing ? <CircularProgress size={20} /> : 'Send'}
-            </Button>
-
-            <IconButton onClick={(event) => setAnchorEl(event.currentTarget)}>
-              <Save />
-            </IconButton>
-
-            <Menu
-              anchorEl={anchorEl}
-              open={Boolean(anchorEl)}
-              onClose={() => setAnchorEl(null)}
-            >
-              <MenuItem onClick={() => exportSolution('pdf')}>Export as PDF</MenuItem>
-              <MenuItem onClick={() => exportSolution('png')}>Export as PNG</MenuItem>
-              <MenuItem onClick={() => exportSolution('txt')}>Export as Text</MenuItem>
-            </Menu>
-          </Box>
+          {connectionStatus !== 'connected' && (
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+              Live connection is {connectionStatus}; requests fall back to HTTP.
+            </Typography>
+          )}
         </Box>
-      </ChatSection>
-    </MainContent>
+      </ChatPane>
+    </Layout>
   );
 };
