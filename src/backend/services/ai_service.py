@@ -20,6 +20,7 @@ from config.settings import get_settings
 from services import math_engine
 from services.common import utc_now_iso
 from services.llm_client import LLMClientError, RemoteLLMClient, extract_json_object
+from services.learning_style import LearningStyle
 from services.llm_config import LLMConfigStore, RemoteLLMSettings
 from services.math_engine import MathParseError
 from services.optional_deps import HAS_ML_STACK, ml_stack_status
@@ -379,10 +380,12 @@ class AIService:
 
     async def _solve_with_remote_llm(self, problem: str, context: Dict[str, Any], started: float) -> Dict[str, Any]:
         """Word problems via the configured OpenAI-compatible endpoint, cross-checked with SymPy."""
+        style = LearningStyle.from_mapping(context.get("learning_style"))
+        style_hint = f"\n\n{style.prompt_hint()} Reflect these preferences in the wording of the steps." if style and style.prompt_hint() else ""
         try:
             data = await self.complete_json(
                 self._WORD_PROBLEM_SYSTEM,
-                f"Problem: {problem}",
+                f"Problem: {problem}{style_hint}",
                 max_tokens=_as_int(context.get("max_tokens"), self.settings.ai_max_tokens),
                 temperature=_as_float(context.get("temperature")),
             )

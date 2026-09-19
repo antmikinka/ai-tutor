@@ -26,12 +26,13 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Mapping
 
 import sympy as sp
 
 from config.settings import get_settings
 from services import math_engine
+from services.learning_style import LearningStyle
 from services.common import utc_now_iso
 from services.math_engine import MathParseError
 
@@ -55,6 +56,7 @@ class Generated:
     concept: str
     hints: List[str]
     family: str
+    sketch: Optional[str] = None  # what to draw on the whiteboard to see the structure
 
 
 TemplateFn = Callable[[random.Random, str], Generated]
@@ -480,6 +482,8 @@ class PracticeProblem:
     hints: List[str]
     sources: List[Dict[str, Any]]
     generator: str
+    sketch: Optional[str] = None
+    learning_style: Optional[Dict[str, Any]] = None
     created_at: str = field(default_factory=utc_now_iso)
     attempts: int = 0
     hints_used: int = 0
@@ -504,12 +508,29 @@ class PracticeProblem:
             "hints": self.hints[: self.hints_used],
             "sources": self.sources,
             "generator": self.generator,
+            "sketch": self.sketch,
+            "learning_style": self.learning_style,
             "note": self.note,
             "attempts": self.attempts,
             "solved": self.solved,
             "revealed": self.revealed,
             "created_at": self.created_at,
         }
+
+
+# What to draw for each family when the template generator is used. Written
+# generically so they hold for every template in the family.
+FAMILY_SKETCHES: Dict[str, str] = {
+    "linear": "Draw a bar model: one bar for the total, split into the fixed part and equal-sized repeated parts; label each piece.",
+    "proportion": "Draw a double number line or a 2x2 ratio table with the known pair on one row and the unknown pair on the other.",
+    "percent": "Draw a 100% bar, shade the percentage involved, and write the money amounts under the whole bar and the shaded part.",
+    "motion": "Sketch a distance-time graph: a straight line for each mover, the slope is the speed; mark where lines meet or reach the target distance.",
+    "geometry": "Draw the shape roughly to scale and label every side or radius with its number or expression.",
+    "quadratic": "Sketch the rectangle (label w and the longer side) or the parabola with its start height and the level you are solving for.",
+    "systems": "Draw a two-column table: one row per kind of item, columns for how many and how much money; the totals row gives the equation.",
+    "exponential": "Draw a table doubling step by step, then plot the points to see the curve bend upwards.",
+    "calculus": "Sketch the graph of the given function; the derivative is its slope, the definite integral is the shaded area between the limits.",
+}
 
 
 _LLM_SYSTEM = (
@@ -522,7 +543,8 @@ _LLM_SYSTEM = (
     "\"variable\" (the unknown's letter, or null), "
     "\"answer\" (the intended final answer as a number or expression, e.g. '10' or '6*t + 2'), "
     "\"concept\" (2-6 words naming the skill), "
-    "\"hints\" (array of exactly 3 progressively more specific hints; the last one may state the equation). "
+    "\"hints\" (array of exactly 3 progressively more specific hints; the last one may state the equation), "
+    "and optionally \"sketch\" (one sentence: what to draw to see the structure of the problem). "
     "Rules for \"equation\": only digits, operators, parentheses, known functions (sqrt, sin, ...) and ONE unknown "
     "written as a single lowercase letter other than e (prefer x, n, t, m, p, r, w); never use words, units, currency "
     "symbols or percent signs (write 25% as 0.25 or 25/100). Rules for \"answer\": it must be exactly what solving "
@@ -581,8 +603,10 @@ class PracticeService:
         family: Optional[str] = None,
         mode: str = "auto",
         seed: Optional[int] = None,
+        learning_style: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         topic = (topic or "").strip() or "general practice"
+        style = LearningStyle.from_mapping(learning_style)
         difficulty = difficulty if difficulty in DIFFICULTIES else "medium"
         rng = random.Random(seed)
         started = time.perf_counter()
@@ -597,7 +621,7 @@ class PracticeService:
 
         want_llm = mode in ("auto", "llm") and self.ai is not None and self.ai.any_llm_available
         if want_llm:
-            generated, engine_result, failure = await self._generate_with_llm(topic, difficulty, sources, family)
+            generated, engine_result, failure = await self._generate_with_llm(topic, difficulty, sources, family, style)
             if generated is not None:
                 generator = self.ai.llm_name or "llm"
             else:
@@ -632,6 +656,8 @@ class PracticeService:
             hints=generated.hints[:3],
             sources=sources,
             generator=generator,
+            sketch=generated.sketch or FAMILY_SKETCHES.get(generated.family),
+            learning_style=style.to_dict() if style else None,
             note=note,
         )
         self._remember(problem)
@@ -664,13 +690,14 @@ class PracticeService:
             for h in hits
         ]
 
-    async def _generate_with_llm(self, topic, difficulty, sources, family) -> Tuple[Optional[Generated], Optional[math_engine.MathResult], str]:
+    async def _generate_with_llm(self, topic, difficulty, sources, family, style: Optional[LearningStyle] = None) -> Tuple[Optional[Generated], Optional[math_engine.MathResult], str]:
         from services.ai_service import NoLanguageModelError
 
         excerpts = "\n\n".join(f"[{s['title']}{f', p.{s['page']}' if s['page'] else ''}]\n{s['text'][:1200]}" for s in sources) or "(no course material uploaded; use general knowledge)"
         family_hint = f" The problem should exercise: {FAMILIES[family]['label']}." if family in FAMILIES else ""
+        style_hint = f"\n\n{style.prompt_hint()}" if style and style.prompt_hint() else ""
         user = (
-            f"Topic: {topic}\nDifficulty: {difficulty}.{family_hint}\n\nCourse material excerpts:\n{excerpts}\n\n"
+            f"Topic: {topic}\nDifficulty: {difficulty}.{family_hint}\n\nCourse material excerpts:\n{excerpts}{style_hint}\n\n"
             "Write one word problem that practises exactly this material."
         )
         failure = ""
@@ -699,8 +726,9 @@ class PracticeService:
             while len(hints) < 3:
                 hints.append(f"The equation to solve is {equation}.")
             fam = family if family in FAMILIES else pick_family(f"{topic} {data.get('concept', '')}", problem, difficulty, random.Random(0))
+            sketch = str(data.get("sketch") or "").strip() or None
             return (
-                Generated(problem, equation, data.get("variable") or result.variable, answer, str(data.get("concept") or FAMILIES[fam]["label"]), hints, fam),
+                Generated(problem, equation, data.get("variable") or result.variable, answer, str(data.get("concept") or FAMILIES[fam]["label"]), hints, fam, sketch),
                 result,
                 "",
             )
@@ -861,6 +889,7 @@ class PracticeService:
             "engine_solution": result.solution,
             "solution_latex": result.solution_latex,
             "steps": [f"Model the situation: {problem.equation}"] + list(result.steps) + extra,
+            "sketch": problem.sketch,
             "hints": problem.hints,
             "stats": self.stats(),
             "timestamp": utc_now_iso(),

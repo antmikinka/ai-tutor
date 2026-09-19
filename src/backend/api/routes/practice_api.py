@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class LearningStyleIn(BaseModel):
+    """VARK questionnaire scores (each mode 0-16)."""
+
+    visual: int = Field(default=0, ge=0, le=16)
+    aural: int = Field(default=0, ge=0, le=16)
+    read_write: int = Field(default=0, ge=0, le=16)
+    kinesthetic: int = Field(default=0, ge=0, le=16)
+
+
 class GenerateRequest(BaseModel):
     topic: str = Field(default="", max_length=300)
     difficulty: Literal["easy", "medium", "hard"] = "medium"
@@ -26,6 +35,7 @@ class GenerateRequest(BaseModel):
     family: Optional[str] = None
     mode: Literal["auto", "llm", "templates"] = "auto"
     seed: Optional[int] = None
+    learning_style: Optional[LearningStyleIn] = None
 
 
 class CheckRequest(BaseModel):
@@ -54,6 +64,7 @@ async def generate_problem(request: GenerateRequest, service: PracticeService = 
             family=request.family,
             mode=request.mode,
             seed=request.seed,
+            learning_style=request.learning_style.model_dump() if request.learning_style else None,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Practice generation failed")
