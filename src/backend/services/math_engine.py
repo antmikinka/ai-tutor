@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import sympy as sp
+from sympy.printing.latex import LatexPrinter
+from sympy.printing.str import StrPrinter
 from sympy.parsing.sympy_parser import (
     convert_xor,
     implicit_multiplication_application,
@@ -244,18 +246,46 @@ def _pick_variable(exprs: Iterable[sp.Basic], requested: Optional[str] = None) -
     return sorted(symbols, key=lambda s: s.name)[0]
 
 
+class _HumanStr(StrPrinter):
+    """Prints 180.000000000000 as 180 and 87.5000000000000 as 87.5."""
+
+    def _print_Float(self, expr):  # noqa: N802
+        return _human_float(expr)
+
+
+class _HumanLatex(LatexPrinter):
+    def _print_Float(self, expr):  # noqa: N802
+        return _human_float(expr)
+
+
+def _human_float(value: Any) -> str:
+    text = format(float(value), ".10g")
+    if "e" in text:
+        mantissa, exponent = text.split("e")
+        return f"{mantissa}*10^{int(exponent)}"
+    return text
+
+
+def _integer_floats(expr: sp.Basic) -> sp.Basic:
+    """1.0*t -> t, 2.0*x**2 -> 2*x**2 (only whole-valued floats are touched)."""
+    if not expr.has(sp.Float):
+        return expr
+    subs = {f: sp.Integer(int(f)) for f in expr.atoms(sp.Float) if abs(float(f)) < 1e15 and float(f).is_integer()}
+    return expr.xreplace(subs) if subs else expr
+
+
 def _fmt(expr: Any) -> str:
     """Plain-text rendering suitable for the chat UI."""
     if isinstance(expr, (list, tuple, set, frozenset, sp.FiniteSet)):
         return ", ".join(_fmt(item) for item in expr)
-    return sp.sstr(expr)
+    return _HumanStr().doprint(_integer_floats(expr)) if isinstance(expr, sp.Basic) else str(expr)
 
 
 def _latex(expr: Any) -> str:
     try:
         if isinstance(expr, (list, tuple)):
-            return ",\\ ".join(sp.latex(item) for item in expr)
-        return sp.latex(expr)
+            return ",\\ ".join(_latex(item) for item in expr)
+        return _HumanLatex().doprint(_integer_floats(expr)) if isinstance(expr, sp.Basic) else sp.latex(expr)
     except Exception:
         return str(expr)
 
@@ -263,7 +293,7 @@ def _latex(expr: Any) -> str:
 def _approx(expr: sp.Basic, digits: int = 6) -> Optional[str]:
     """Decimal approximation when the exact result is not already a plain number."""
     try:
-        if expr.free_symbols or expr.is_Integer or not expr.is_number:
+        if expr.free_symbols or expr.is_Integer or expr.is_Float or not expr.is_number:
             return None
         if expr.is_Rational and (expr.q & (expr.q - 1)) == 0 and expr.q <= 16:
             # Halves, quarters, ... already read naturally (1/2, 3/4); no need for 0.5.
@@ -429,7 +459,7 @@ def solve_equation(text: str, variable: Optional[str] = None) -> MathResult:
         problem_type="equation",
         solution=rendered,
         steps=steps,
-        solution_latex=",\\ ".join(f"{sp.latex(var)} = {sp.latex(s)}" for s in solutions),
+        solution_latex=",\\ ".join(f"{_latex(var)} = {_latex(s)}" for s in solutions),
         confidence=confidence,
         variable=var.name,
         result=solutions,
@@ -454,7 +484,7 @@ def _solve_system(equations: List[sp.Eq]) -> MathResult:
         problem_type="system",
         solution=rendered,
         steps=steps,
-        solution_latex=",\\ ".join(f"{sp.latex(k)} = {sp.latex(v)}" for sol in solutions for k, v in sol.items()),
+        solution_latex=",\\ ".join(f"{_latex(k)} = {_latex(v)}" for sol in solutions for k, v in sol.items()),
         confidence=0.95,
         result=solutions,
     )
@@ -489,7 +519,7 @@ def differentiate(text: str) -> MathResult:
     ]
     if simplified != derivative:
         steps.append(f"Simplify: f'({var}) = {_fmt(simplified)}")
-    return MathResult(text, "derivative", f"f'({var}) = {_fmt(simplified)}", steps, sp.latex(simplified), 0.97, variable=var.name, result=simplified)
+    return MathResult(text, "derivative", f"f'({var}) = {_fmt(simplified)}", steps, _latex(simplified), 0.97, variable=var.name, result=simplified)
 
 
 _BOUNDS_PATTERN = re.compile(r"\bfrom\s+(.+?)\s+to\s+(.+?)(?:\s+with respect to\s+[a-z])?\s*$", re.IGNORECASE)
@@ -515,11 +545,11 @@ def integrate(text: str) -> MathResult:
         steps.append(f"Antiderivative: F({var}) = {_fmt(antiderivative)}")
         steps.append(f"Evaluate F({_fmt(upper)}) - F({_fmt(lower)}) = {_fmt(value)}")
         return MathResult(
-            text, "definite_integral", _fmt(value), steps, sp.latex(value), 0.97,
+            text, "definite_integral", _fmt(value), steps, _latex(value), 0.97,
             variable=var.name, result=value, approximation=_approx(value),
         )
     steps.append(f"Result: {_fmt(antiderivative)} + C")
-    return MathResult(text, "integral", f"{_fmt(antiderivative)} + C", steps, sp.latex(antiderivative) + " + C", 0.96, variable=var.name, result=antiderivative)
+    return MathResult(text, "integral", f"{_fmt(antiderivative)} + C", steps, _latex(antiderivative) + " + C", 0.96, variable=var.name, result=antiderivative)
 
 
 _LIMIT_PATTERN = re.compile(r"\bas\s+([A-Za-z])\s*(?:->|approaches|tends to|goes to)\s*(.+?)\s*$", re.IGNORECASE)
@@ -552,7 +582,7 @@ def limit(text: str) -> MathResult:
     except Exception:
         pass
     steps.append(f"Limit = {_fmt(value)}")
-    return MathResult(text, "limit", _fmt(value), steps, sp.latex(value), 0.95, variable=var.name, result=value, approximation=_approx(value))
+    return MathResult(text, "limit", _fmt(value), steps, _latex(value), 0.95, variable=var.name, result=value, approximation=_approx(value))
 
 
 def _rewrite(text: str, kind: str) -> MathResult:
@@ -563,7 +593,7 @@ def _rewrite(text: str, kind: str) -> MathResult:
     steps = [f"Original expression: {_fmt(expr)}", f"{kind.capitalize()}: {_fmt(result)}"]
     if result == expr:
         steps.append(f"The expression is already in its {kind if kind != 'simplify' else 'simplest'} form.")
-    return MathResult(text, kind, _fmt(result), steps, sp.latex(result), 0.95, result=result)
+    return MathResult(text, kind, _fmt(result), steps, _latex(result), 0.95, result=result)
 
 
 def evaluate(text: str) -> MathResult:
@@ -577,7 +607,7 @@ def evaluate(text: str) -> MathResult:
         else:
             steps.append("No further simplification is possible without values for the variables.")
         variables = ", ".join(sorted(s.name for s in expr.free_symbols))
-        return MathResult(text, "simplify", _fmt(simplified), steps, sp.latex(simplified), 0.85, variable=variables, result=simplified)
+        return MathResult(text, "simplify", _fmt(simplified), steps, _latex(simplified), 0.85, variable=variables, result=simplified)
 
     exact = sp.nsimplify(expr) if expr.is_Float else sp.simplify(expr)
     steps = [f"Expression: {_fmt(expr)}"]
@@ -587,7 +617,7 @@ def evaluate(text: str) -> MathResult:
         steps.append(f"Decimal approximation: {approx}")
     else:
         steps.append(f"Result: {_fmt(exact)}")
-    return MathResult(text, "evaluate", _fmt(exact), steps, sp.latex(exact), 0.98, result=exact, approximation=approx)
+    return MathResult(text, "evaluate", _fmt(exact), steps, _latex(exact), 0.98, result=exact, approximation=approx)
 
 
 # --------------------------------------------------------------------------- #

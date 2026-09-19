@@ -132,3 +132,12 @@ def test_constant_equation_is_a_parse_error():
         solve("2 + 2 = 4")
     with pytest.raises(MathParseError, match="constants"):
         solve("3*4 = 11")
+
+
+def test_decimal_inputs_print_like_a_person_writes_them():
+    r = solve("1200*0.05*3 = i")
+    assert r.solution == "i = 180" and r.solution_latex == "i = 180" and r.approximation is None
+    assert all("180.000" not in step for step in r.steps)
+    assert solve("437.50 = 2500 * 0.035 * t").solution == "t = 5"
+    assert solve("derivative of 0.5*t^2").solution == "f'(t) = t"
+    assert solve("x^2 = 2.5").solution == "x = -1.58113883 or x = 1.58113883"
