@@ -93,12 +93,21 @@ export interface PracticeSettings {
   preferLanguageModel: boolean;
 }
 
+/** VARK questionnaire scores, 0-16 per mode. All zero = not set. */
+export interface LearningStyleSettings {
+  visual: number;
+  aural: number;
+  readWrite: number;
+  kinesthetic: number;
+}
+
 export interface UserSettings {
   audioSettings: AudioSettings;
   modelSettings: ModelSettings;
   displaySettings: DisplaySettings;
   whiteboardSettings: WhiteboardSettings;
   practiceSettings: PracticeSettings;
+  learningStyle: LearningStyleSettings;
   modelConfig: ModelConfig;
   appVersion: string;
 }
@@ -166,6 +175,9 @@ export interface PracticeProblem {
   hints: string[];
   sources: PracticeSource[];
   generator: string;
+  /** What to draw on the whiteboard to see the structure (LLM-written or per-family). */
+  sketch: string | null;
+  learning_style: { visual: number; aural: number; read_write: number; kinesthetic: number; preferred: string[]; label: string } | null;
   note: string | null;
   attempts: number;
   solved: boolean;
@@ -207,6 +219,7 @@ export interface PracticeSolution {
   engine_solution: string;
   solution_latex: string;
   steps: string[];
+  sketch: string | null;
   hints: string[];
   stats: PracticeStats;
 }

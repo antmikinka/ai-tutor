@@ -48,6 +48,7 @@ export const defaultSettings: UserSettings = {
     showEquationImmediately: false,
     preferLanguageModel: true,
   },
+  learningStyle: { visual: 0, aural: 0, readWrite: 0, kinesthetic: 0 },
   modelConfig: {
     reasoningModel: 'Qwen3-Omni-30B-A3B-Thinking',
     ttsModel: 'Microsoft-VibeVoice-1.5B',
@@ -72,6 +73,7 @@ const mergeSettings = (base: UserSettings, patch: Partial<UserSettings> | null |
   displaySettings: { ...base.displaySettings, ...(patch?.displaySettings || {}) },
   whiteboardSettings: { ...base.whiteboardSettings, ...(patch?.whiteboardSettings || {}) },
   practiceSettings: { ...base.practiceSettings, ...(patch?.practiceSettings || {}) },
+  learningStyle: { ...base.learningStyle, ...(patch?.learningStyle || {}) },
   modelConfig: {
     ...base.modelConfig,
     ...(patch?.modelConfig || {}),
@@ -178,6 +180,11 @@ export const useAppSettings = () => {
     [updateSettings],
   );
 
+  const updateLearningStyle = useCallback(
+    (learningStyle: Partial<UserSettings['learningStyle']>) => updateSettings({ learningStyle: learningStyle as UserSettings['learningStyle'] }),
+    [updateSettings],
+  );
+
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
@@ -195,6 +202,7 @@ export const useAppSettings = () => {
     updateModelConfig,
     updateWhiteboardSettings,
     updatePracticeSettings,
+    updateLearningStyle,
   };
 };
 

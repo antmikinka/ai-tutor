@@ -13,6 +13,7 @@ import { WebSocketRequestError } from '../hooks/useWebSocket';
 import { ApiError, apiFetch } from '../lib/backend';
 import type { ChatMessage, ChatMessageInput, UserInputSource } from '../types/MathTypes';
 import type { BackendSolution, BackendVerification, DrawingAnalysis } from '../types/protocol';
+import { toBackendStyle } from '../lib/vark';
 
 const Layout = styled(Box)(({ theme }) => ({
   display: 'flex',
@@ -120,6 +121,7 @@ export const MathTutorPage: React.FC = () => {
           enable_thinking: settings.modelSettings.enableThinking,
           temperature: settings.modelSettings.temperature,
           max_tokens: settings.modelSettings.maxTokens,
+          learning_style: toBackendStyle(settings.learningStyle),
         };
         let solution: BackendSolution;
         if (connectionStatus === 'connected') {
@@ -149,6 +151,7 @@ export const MathTutorPage: React.FC = () => {
       settings.modelSettings.enableThinking,
       settings.modelSettings.temperature,
       settings.modelSettings.maxTokens,
+      settings.learningStyle,
     ],
   );
 

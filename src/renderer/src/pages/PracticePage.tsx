@@ -21,7 +21,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { AutoAwesome, Check, Close, Draw, Functions, Lightbulb, Refresh, Visibility } from '@mui/icons-material';
+import { AutoAwesome, Check, Close, Draw, Functions, Gesture, Lightbulb, Refresh, VolumeUp, Visibility } from '@mui/icons-material';
 import { styled } from '@mui/material/styles';
 import { BlockMath } from 'react-katex';
 import 'katex/dist/katex.min.css';
@@ -30,6 +30,7 @@ import { useSettingsContext } from '../contexts/SettingsContext';
 import { useWebSocketContext } from '../contexts/WebSocketContext';
 import { ApiError, apiFetch, apiJson } from '../lib/backend';
 import { describeLLMName } from '../lib/llm';
+import { canSpeak, prefers, speak, styleLabel, toBackendStyle } from '../lib/vark';
 import type { KnowledgeDocument, PracticeCheck, PracticeDifficulty, PracticeProblem, PracticeSolution, PracticeStats, PracticeStatus } from '../types/MathTypes';
 import type { WhiteboardHandoff } from './MathTutorPage';
 
@@ -76,7 +77,10 @@ const StatChip: React.FC<{ label: string; value: React.ReactNode; color?: 'defau
 export const PracticePage: React.FC = () => {
   const navigate = useNavigate();
   const { settings, updatePracticeSettings } = useSettingsContext();
-  const { practiceSettings } = settings;
+  const { practiceSettings, learningStyle } = settings;
+  const likesVisual = prefers(learningStyle, 'visual');
+  const likesAural = prefers(learningStyle, 'aural');
+  const likesKinesthetic = prefers(learningStyle, 'kinesthetic');
   const { capabilities } = useWebSocketContext();
 
   const [status, setStatus] = useState<PracticeStatus | null>(null);
@@ -92,6 +96,7 @@ export const PracticePage: React.FC = () => {
   const [lastCheck, setLastCheck] = useState<PracticeCheck | null>(null);
   const [hints, setHints] = useState<string[]>([]);
   const [showEquation, setShowEquation] = useState(false);
+  const [showSketch, setShowSketch] = useState(false);
   const [solution, setSolution] = useState<PracticeSolution | null>(null);
   const [stats, setStats] = useState<PracticeStats | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -124,17 +129,19 @@ export const PracticePage: React.FC = () => {
         family: family || null,
         doc_ids: selectedDocs.length ? selectedDocs : null,
         mode: practiceSettings.preferLanguageModel ? 'auto' : 'templates',
+        learning_style: toBackendStyle(learningStyle),
       });
       setProblem(next);
       setHints(next.hints);
       setShowEquation(practiceSettings.showEquationImmediately);
+      setShowSketch(likesVisual && Boolean(next.sketch));
       setTimeout(() => answerRef.current?.focus(), 50);
     } catch (err) {
       setError(describe(err));
     } finally {
       setGenerating(false);
     }
-  }, [difficulty, family, practiceSettings.preferLanguageModel, practiceSettings.showEquationImmediately, selectedDocs, topic]);
+  }, [difficulty, family, learningStyle, likesVisual, practiceSettings.preferLanguageModel, practiceSettings.showEquationImmediately, selectedDocs, topic]);
 
   const check = useCallback(async () => {
     if (!problem || !answer.trim() || checking) return;
@@ -193,8 +200,9 @@ export const PracticePage: React.FC = () => {
   const noKnowledge = documents.length === 0;
   const generatorLabel = useMemo(() => {
     if (!problem) return '';
-    return problem.generator === 'templates' ? 'Verified template' : `Language model (${problem.generator.replace(/^remote:/, '')}) — verified by the symbolic engine`;
-  }, [problem]);
+    const base = problem.generator === 'templates' ? 'Verified template' : `Language model (${describeLLMName(problem.generator)}) — verified by the symbolic engine`;
+    return problem.learning_style ? `${base} · presented for ${styleLabel(learningStyle)}` : base;
+  }, [learningStyle, problem]);
 
   return (
     <Layout>
@@ -267,8 +275,15 @@ export const PracticePage: React.FC = () => {
                 </Tooltip>
               ))}
               <Box sx={{ flex: 1 }} />
+              {likesAural && canSpeak() && (
+                <Tooltip title="Read the problem aloud (browser voice)">
+                  <Button size="small" startIcon={<VolumeUp />} onClick={() => speak(problem.problem)} sx={{ textTransform: 'none' }}>
+                    Read aloud
+                  </Button>
+                </Tooltip>
+              )}
               <Tooltip title="Send the problem to the whiteboard to work it out by hand">
-                <Button size="small" startIcon={<Draw />} onClick={toWhiteboard} sx={{ textTransform: 'none' }}>
+                <Button size="small" variant={likesKinesthetic ? 'contained' : 'text'} startIcon={<Draw />} onClick={toWhiteboard} sx={{ textTransform: 'none' }}>
                   Work on whiteboard
                 </Button>
               </Tooltip>
@@ -293,6 +308,11 @@ export const PracticePage: React.FC = () => {
               <Button size="small" variant="outlined" startIcon={<Lightbulb />} onClick={() => void requestHint()} disabled={hints.length >= problem.hints_available} sx={{ textTransform: 'none' }}>
                 Hint ({hints.length}/{problem.hints_available})
               </Button>
+              {problem.sketch && (
+                <Button size="small" variant={showSketch ? 'contained' : 'outlined'} color="secondary" startIcon={<Gesture />} onClick={() => setShowSketch((v) => !v)} sx={{ textTransform: 'none' }}>
+                  {showSketch ? 'Hide sketch idea' : 'Sketch it'}
+                </Button>
+              )}
               <Button size="small" variant="outlined" color="warning" startIcon={<Visibility />} onClick={() => void reveal()} disabled={Boolean(solution)} sx={{ textTransform: 'none' }}>
                 Show solution
               </Button>
@@ -314,6 +334,18 @@ export const PracticePage: React.FC = () => {
                   Solve this in the tutor
                 </Button>
               </Box>
+            </Collapse>
+
+            <Collapse in={showSketch && Boolean(problem.sketch)}>
+              <Alert severity="info" icon={<Gesture fontSize="inherit" />} sx={{ mt: 2 }} action={
+                <Button size="small" color="inherit" onClick={toWhiteboard} sx={{ textTransform: 'none' }}>
+                  Open whiteboard
+                </Button>
+              }>
+                <Typography variant="body2">
+                  <strong>Sketch it:</strong> {problem.sketch}
+                </Typography>
+              </Alert>
             </Collapse>
 
             {hints.length > 0 && (
@@ -366,9 +398,22 @@ export const PracticePage: React.FC = () => {
             <Collapse in={Boolean(solution)}>
               {solution && (
                 <Box sx={{ mt: 2, p: 1.5, border: 1, borderColor: 'divider', borderRadius: 1 }}>
-                  <Typography variant="subtitle2" gutterBottom>
-                    Worked solution — {solution.answer}
-                  </Typography>
+                  <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+                    <Typography variant="subtitle2" sx={{ flex: 1 }}>
+                      Worked solution — {solution.answer}
+                    </Typography>
+                    {likesAural && canSpeak() && (
+                      <Button size="small" startIcon={<VolumeUp />} onClick={() => speak(solution.steps.join('. '))} sx={{ textTransform: 'none' }}>
+                        Read steps
+                      </Button>
+                    )}
+                  </Stack>
+                  {solution.sketch && (
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                      <Gesture fontSize="inherit" sx={{ verticalAlign: 'middle', mr: 0.5 }} />
+                      {solution.sketch}
+                    </Typography>
+                  )}
                   <Stack component="ol" spacing={0.5} sx={{ pl: 2.5, m: 0 }}>
                     {solution.steps.map((step, i) => (
                       <Typography key={i} component="li" variant="body2">

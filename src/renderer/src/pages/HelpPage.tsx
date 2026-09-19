@@ -15,7 +15,7 @@ import {
   ListItemText,
   Typography,
 } from '@mui/material';
-import { Book, Edit, Functions, Mic, QuestionAnswer, School } from '@mui/icons-material';
+import { Book, Edit, Functions, Mic, QuestionAnswer, School, Psychology } from '@mui/icons-material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import { styled } from '@mui/material/styles';
 
@@ -72,6 +72,13 @@ const FEATURES = [
     tags: ['Local / OpenRouter / API', 'Auto fallback', 'Engine cross-check'],
   },
   {
+    icon: <Psychology />,
+    title: 'Learning style (VARK)',
+    description:
+      'Enter your VARK questionnaire scores under Settings → Learning style. Visual learners get a "Sketch it" idea with every problem; read/write learners get precise, fully worded hints; kinesthetic learners get a try-a-number first hint and the whiteboard up front; aural learners get "Read aloud". The maths and the answer checking are the same for everyone.',
+    tags: ['Visual', 'Aural', 'Read/write', 'Kinesthetic'],
+  },
+  {
     icon: <Mic />,
     title: 'Speech (optional)',
     description: 'With the MERaLiON speech model loaded you can dictate problems; with VibeVoice loaded answers can be read aloud.',
@@ -103,6 +110,10 @@ const FAQ = [
   {
     q: 'Where does my API key go, and what is sent to the provider?',
     a: 'The key is saved on this computer only (in the backend data folder, readable by your user account) and is sent solely to the provider base URL you configured. When the API answers a question, the problem text is sent; for practice generation, the retrieved passages from your course material are included so the problem matches what you are studying. In "Local" mode nothing leaves your machine.',
+  },
+  {
+    q: 'What does my learning style actually change?',
+    a: 'Only presentation. Practice problems carry a "Sketch it" suggestion (what to draw on the whiteboard to see the structure), the problem writer is told which kinds of hints to write first, the worked solution repeats the sketch, and problems can be read aloud with the browser voice. A multimodal profile such as V15 A9 R15 K12 is treated as preferring Visual, Read/write and Kinesthetic (the VARK stepping-distance rule), so you get sketches, precise hints and the hands-on hint, but not read-aloud unless you turn it on yourself.',
   },
   {
     q: 'What does the confidence badge mean?',

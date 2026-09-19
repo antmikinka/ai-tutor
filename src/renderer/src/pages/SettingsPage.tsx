@@ -27,6 +27,7 @@ import { styled } from '@mui/material/styles';
 import { useNavigate } from 'react-router-dom';
 import { useSettingsContext } from '../contexts/SettingsContext';
 import { LanguageModelSection } from '../components/LanguageModelSection';
+import { LearningStyleSection } from '../components/LearningStyleSection';
 import { ApiError, apiFetch } from '../lib/backend';
 import { describeLLMName } from '../lib/llm';
 import type { BackendModel, BackendModelStatus, KnowledgeStatus, PracticeStatus, SystemResources, UserSettings } from '../types/MathTypes';
@@ -346,6 +347,21 @@ export const SettingsPage: React.FC = () => {
           </Grid>
         </CardContent>
       </Section>
+
+      {/* ---- Learning style ---- */}
+      <LearningStyleSection
+        value={draft.learningStyle}
+        onChange={(patch) => setField('learningStyle', patch)}
+        onApplyDefaults={(patch) =>
+          setDraft((prev) => ({
+            ...prev,
+            displaySettings: { ...prev.displaySettings, ...(patch.displaySettings || {}) },
+            audioSettings: { ...prev.audioSettings, ...(patch.audioSettings || {}) },
+            whiteboardSettings: { ...prev.whiteboardSettings, ...(patch.whiteboardSettings || {}) },
+            practiceSettings: { ...prev.practiceSettings, ...(patch.practiceSettings || {}) },
+          }))
+        }
+      />
 
       {/* ---- Language model source ---- */}
       <LanguageModelSection onToast={setToast} />
