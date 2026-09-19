@@ -16,7 +16,7 @@ const status = (item: PracticeHistoryItem) => {
   if (item.solved) return { label: 'Solved', color: 'success' as const };
   if (item.revealed) return { label: 'Revealed', color: 'warning' as const };
   if (item.attempts > 0) return { label: `${item.attempts} try`, color: 'default' as const };
-  return { label: 'Open', color: 'default' as const };
+  return null;
 };
 
 export const PracticeHistory: React.FC<Props> = ({ history, activeId, onOpen, onWhiteboard, onDelete, onClear }) => {
@@ -49,8 +49,8 @@ export const PracticeHistory: React.FC<Props> = ({ history, activeId, onOpen, on
                       <Typography variant="body2" sx={{ fontWeight: 500 }}>
                         {item.family_label}
                       </Typography>
-                      <Chip size="small" label={chip.label} color={chip.color} variant={chip.color === 'default' ? 'outlined' : 'filled'} />
-                      {item.has_whiteboard && <Chip size="small" variant="outlined" label="board" />}
+                      {chip && <Chip size="small" label={chip.label} color={chip.color} variant={chip.color === 'default' ? 'outlined' : 'filled'} />}
+                      {item.has_whiteboard && <Chip size="small" variant="outlined" label="drawing" />}
                     </Stack>
                   }
                   secondary={item.preview}

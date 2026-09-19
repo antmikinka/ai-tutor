@@ -482,8 +482,9 @@ export const MathTutorPage: React.FC = () => {
 
   const persistBoard = useCallback(() => {
     const id = sessionIdRef.current;
+    if (!id || canvasRef.current?.isEmpty()) return;
     const json = canvasRef.current?.toJSON();
-    if (!id || !json) return;
+    if (!json) return;
     void apiJson(`/api/practice/problems/${id}/whiteboard`, 'PUT', { canvas_json: json }).catch(() => undefined);
   }, []);
 
