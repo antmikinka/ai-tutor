@@ -7,11 +7,12 @@ import { DrawingCanvas, DrawingCanvasRef, DrawingTool } from '../components/Draw
 import { TOOL_HOTKEYS, WhiteboardToolbar } from '../components/WhiteboardToolbar';
 import { ChatInterface } from '../components/ChatInterface';
 import { MathInput } from '../components/MathInput';
+import { PracticeDecks } from '../components/PracticeDecks';
 import { useWebSocketContext } from '../contexts/WebSocketContext';
 import { useSettingsContext } from '../contexts/SettingsContext';
 import { WebSocketRequestError } from '../hooks/useWebSocket';
-import { ApiError, apiFetch } from '../lib/backend';
-import type { ChatMessage, ChatMessageInput, UserInputSource } from '../types/MathTypes';
+import { ApiError, apiFetch, apiJson } from '../lib/backend';
+import type { BoardReading, ChatMessage, ChatMessageInput, PracticeCheck, PracticeHistory, PracticeProblem, PracticeSolution, UserInputSource } from '../types/MathTypes';
 import type { BackendSolution, BackendVerification, DrawingAnalysis } from '../types/protocol';
 import { toBackendStyle } from '../lib/vark';
 
@@ -25,11 +26,13 @@ const Layout = styled(Box)(({ theme }) => ({
 const CanvasPane = styled(Paper)(({ theme }) => ({
   flex: 1,
   minWidth: 0,
-  minHeight: 320,
+  minHeight: 0,
   display: 'flex',
   flexDirection: 'column',
   padding: theme.spacing(2),
 }));
+
+const ACTIVE_PROBLEM_KEY = 'mathTutorActiveProblem';
 
 const ChatPane = styled(Paper)(({ theme }) => ({
   width: 420,
@@ -43,6 +46,8 @@ const ChatPane = styled(Paper)(({ theme }) => ({
 
 /** Router state accepted by this page (sent from the Practice page). */
 export interface WhiteboardHandoff {
+  problemId?: string;
+  /** @deprecated kept so older hand-offs still land; the problem now lives in the decks. */
   whiteboardText?: string;
   prefillInput?: string;
 }
@@ -87,7 +92,23 @@ export const MathTutorPage: React.FC = () => {
   const [exportAnchor, setExportAnchor] = useState<null | HTMLElement>(null);
   const [recording, setRecording] = useState(false);
 
+  const [session, setSession] = useState<PracticeProblem | null>(null);
+  const [sessionHints, setSessionHints] = useState<string[]>([]);
+  const [sessionAnswer, setSessionAnswer] = useState('');
+  const [sessionCheck, setSessionCheck] = useState<PracticeCheck | null>(null);
+  const [sessionSolution, setSessionSolution] = useState<PracticeSolution | null>(null);
+  const [showEquation, setShowEquation] = useState(false);
+  const [showSketch, setShowSketch] = useState(false);
+  const [sessionChecking, setSessionChecking] = useState(false);
+  const [reading, setReading] = useState<BoardReading | null>(null);
+  const [readingBusy, setReadingBusy] = useState(false);
+  const [objectCount, setObjectCount] = useState(0);
+  const [boardReady, setBoardReady] = useState(false);
+
   const canvasRef = useRef<DrawingCanvasRef>(null);
+  const readTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -432,20 +453,141 @@ export const MathTutorPage: React.FC = () => {
 
   useEffect(() => () => recorderRef.current?.stop(), []);
 
-  // ---- hand-off from the Practice page ---------------------------------
+  const openProblem = useCallback(async (problemId: string, opts?: { restoreBoard?: boolean }) => {
+    try {
+      const next = await apiFetch<PracticeProblem>(`/api/practice/problems/${problemId}`);
+      sessionIdRef.current = next.id;
+      setSession(next);
+      setSessionHints(next.hints);
+      setSessionAnswer(next.last_attempt || '');
+      setSessionCheck(null);
+      setSessionSolution(null);
+      setShowEquation(next.revealed || settings.practiceSettings.showEquationImmediately);
+      setShowSketch(Boolean(next.sketch && settings.learningStyle.visual > 0));
+      localStorage.setItem(ACTIVE_PROBLEM_KEY, next.id);
+      if (opts?.restoreBoard !== false && next.has_whiteboard) {
+        const board = await apiFetch<{ canvas_json: string | null }>(`/api/practice/problems/${next.id}/whiteboard`);
+        if (board.canvas_json) {
+          await canvasRef.current?.loadJSON(board.canvas_json);
+        } else {
+          canvasRef.current?.clear();
+        }
+      } else {
+        canvasRef.current?.clear();
+      }
+    } catch (error) {
+      pushError(error);
+    }
+  }, [pushError, settings.learningStyle.visual, settings.practiceSettings.showEquationImmediately]);
+
+  const persistBoard = useCallback(() => {
+    const id = sessionIdRef.current;
+    const json = canvasRef.current?.toJSON();
+    if (!id || !json) return;
+    void apiJson(`/api/practice/problems/${id}/whiteboard`, 'PUT', { canvas_json: json }).catch(() => undefined);
+  }, []);
+
+  const readBoard = useCallback(() => {
+    const readable = canvasRef.current?.getReadable();
+    setObjectCount(readable?.objectCount ?? 0);
+    if (!readable || readable.texts.length === 0) {
+      setReading(null);
+      setReadingBusy(false);
+      return;
+    }
+    setReadingBusy(true);
+    void apiJson<BoardReading>('/api/practice/read-board', 'POST', {
+      texts: readable.texts,
+      problem_id: sessionIdRef.current,
+    })
+      .then(setReading)
+      .catch(() => undefined)
+      .finally(() => setReadingBusy(false));
+  }, []);
+
+  const onCanvasChange = useCallback(
+    ({ isEmpty }: { isEmpty: boolean }) => {
+      setCanvasEmpty(isEmpty);
+      setObjectCount(canvasRef.current?.getReadable().objectCount ?? 0);
+      if (readTimer.current) clearTimeout(readTimer.current);
+      readTimer.current = setTimeout(readBoard, 700);
+      if (sessionIdRef.current) {
+        if (saveTimer.current) clearTimeout(saveTimer.current);
+        saveTimer.current = setTimeout(persistBoard, 1200);
+      }
+    },
+    [persistBoard, readBoard],
+  );
+
+  const sessionHint = useCallback(async () => {
+    if (!session) return;
+    try {
+      const result = await apiJson<{ hints: string[] }>(`/api/practice/problems/${session.id}/hint`, 'POST');
+      setSessionHints(result.hints);
+    } catch (error) {
+      pushError(error);
+    }
+  }, [pushError, session]);
+
+  const sessionReveal = useCallback(async () => {
+    if (!session) return;
+    try {
+      const result = await apiJson<PracticeSolution>(`/api/practice/problems/${session.id}/solution`, 'POST');
+      setSessionSolution(result);
+      setShowEquation(true);
+      setSession((prev) => (prev ? { ...prev, revealed: true } : prev));
+    } catch (error) {
+      pushError(error);
+    }
+  }, [pushError, session]);
+
+  const sessionCheckAnswer = useCallback(async () => {
+    if (!session || !sessionAnswer.trim() || sessionChecking) return;
+    setSessionChecking(true);
+    try {
+      const verdict = await apiJson<PracticeCheck>(`/api/practice/problems/${session.id}/check`, 'POST', { answer: sessionAnswer });
+      setSessionCheck(verdict);
+      setSession((prev) => (prev ? { ...prev, attempts: verdict.attempts, solved: verdict.solved, hints_used: verdict.hints_used } : prev));
+      if (verdict.hint) setSessionHints((h) => (h.includes(verdict.hint as string) ? h : [...h, verdict.hint as string]));
+      if (verdict.correct) setShowEquation(true);
+    } catch (error) {
+      pushError(error);
+    } finally {
+      setSessionChecking(false);
+    }
+  }, [pushError, session, sessionAnswer, sessionChecking]);
+
+  // ---- hand-off from the Practice page, or last opened problem ----------
 
   useEffect(() => {
     const state = location.state as WhiteboardHandoff | null;
-    if (!state || (!state.whiteboardText && !state.prefillInput)) return;
-    if (state.whiteboardText) {
-      // The canvas mounts in the same commit; defer one frame so it has its size.
-      const text = state.whiteboardText;
-      requestAnimationFrame(() => canvasRef.current?.addText(text));
-      setTool('pen');
+    if (state?.problemId) {
+      navigate(location.pathname, { replace: true, state: null });
+      void openProblem(state.problemId);
+      return;
     }
-    if (state.prefillInput) setInput(state.prefillInput);
-    navigate(location.pathname, { replace: true, state: null });
-  }, [location.pathname, location.state, navigate]);
+    if (state?.whiteboardText || state?.prefillInput) {
+      if (state.prefillInput) setInput(state.prefillInput);
+      navigate(location.pathname, { replace: true, state: null });
+      return;
+    }
+    if (sessionIdRef.current) return;
+    const stored = localStorage.getItem(ACTIVE_PROBLEM_KEY);
+    void apiFetch<PracticeHistory>('/api/practice/history')
+      .then((hist) => {
+        const id = hist.last_opened_id || stored;
+        if (id) return openProblem(id);
+        return undefined;
+      })
+      .catch(() => undefined)
+      .finally(() => setBoardReady(true));
+  }, [location.pathname, location.state, navigate, openProblem]);
+
+  useEffect(() => () => {
+    if (readTimer.current) clearTimeout(readTimer.current);
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    persistBoard();
+  }, [persistBoard]);
 
   const speechAvailable = Boolean(capabilities?.speech);
   const recognitionAvailable = Boolean(capabilities?.drawing_recognition);
@@ -528,19 +670,47 @@ export const MathTutorPage: React.FC = () => {
           </Menu>
         </WhiteboardToolbar>
 
-        <Box sx={{ flex: 1, minHeight: 0, border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'hidden' }}>
+        <Box sx={{ height: { xs: 'auto', md: '34%' }, minHeight: { xs: 220, md: 200 }, maxHeight: { md: 320 }, mb: 1.5, flexShrink: 0 }}>
+          <PracticeDecks
+            problem={session}
+            showEquation={showEquation}
+            onToggleEquation={() => setShowEquation((v) => !v)}
+            showSketch={showSketch}
+            onToggleSketch={() => setShowSketch((v) => !v)}
+            hints={sessionHints}
+            onHint={() => void sessionHint()}
+            onReveal={() => void sessionReveal()}
+            solution={sessionSolution}
+            answer={sessionAnswer}
+            onAnswerChange={setSessionAnswer}
+            onCheck={() => void sessionCheckAnswer()}
+            checking={sessionChecking}
+            lastCheck={sessionCheck}
+            reading={reading}
+            readingBusy={readingBusy}
+            objectCount={objectCount}
+            onGoPractice={() => navigate('/practice')}
+          />
+        </Box>
+
+        <Box sx={{ flex: 1, minHeight: 220, border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'hidden' }}>
           <DrawingCanvas
             ref={canvasRef}
             tool={tool}
             color={color}
             lineWidth={lineWidth}
             grid={whiteboardSettings.grid}
-            emptyHint="Work the problem out here — draw, add text or shapes. Type the expression below for an exact answer, or open Practice for a word problem to try."
-            onChange={({ isEmpty }) => setCanvasEmpty(isEmpty)}
+            emptyHint={session ? 'Work it out here. The problem stays in the deck above — use T to type the equation or your answer and it will be read live.' : 'Draw, add text or shapes. Typed math (T tool) is read in the right deck as you write. Open Practice to pin a word problem above the board.'}
+            onChange={onCanvasChange}
             onHistoryChange={setHistory}
             onSelectionChange={setHasSelection}
           />
         </Box>
+        {boardReady && session && (
+          <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+            Working on saved problem · {session.concept} · drawing is stored with this problem
+          </Typography>
+        )}
       </CanvasPane>
 
       <ChatPane elevation={1}>

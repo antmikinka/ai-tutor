@@ -19,14 +19,16 @@ own set-up with it, which is the point of the exercise.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import re
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Mapping
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import sympy as sp
 
@@ -490,6 +492,8 @@ class PracticeProblem:
     solved: bool = False
     revealed: bool = False
     note: Optional[str] = None
+    last_opened_at: Optional[str] = None
+    last_attempt: Optional[str] = None
 
     def public(self) -> Dict[str, Any]:
         return {
@@ -515,7 +519,36 @@ class PracticeProblem:
             "solved": self.solved,
             "revealed": self.revealed,
             "created_at": self.created_at,
+            "last_opened_at": self.last_opened_at,
+            "last_attempt": self.last_attempt,
+            "has_whiteboard": False,  # filled in by the service when listing
         }
+
+    def summary(self, *, has_whiteboard: bool = False) -> Dict[str, Any]:
+        """History row: enough to reopen, never the answer or unused hints."""
+        return {
+            "id": self.id,
+            "topic": self.topic,
+            "difficulty": self.difficulty,
+            "family": self.family,
+            "family_label": FAMILIES.get(self.family, {}).get("label", self.family),
+            "concept": self.concept,
+            "preview": self.problem if len(self.problem) <= 180 else self.problem[:177] + "…",
+            "attempts": self.attempts,
+            "solved": self.solved,
+            "revealed": self.revealed,
+            "created_at": self.created_at,
+            "last_opened_at": self.last_opened_at,
+            "has_whiteboard": has_whiteboard,
+        }
+
+    def record(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_record(cls, data: Dict[str, Any]) -> "PracticeProblem":
+        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 # What to draw for each family when the template generator is used. Written
@@ -532,6 +565,8 @@ FAMILY_SKETCHES: Dict[str, str] = {
     "calculus": "Sketch the graph of the given function; the derivative is its slope, the definite integral is the shaded area between the limits.",
 }
 
+
+_MATHISH = re.compile(r"[=+\-*/^]|derivative|integrate|limit|simplify|factor|expand|\d", re.I)
 
 _LLM_SYSTEM = (
     "You write short, realistic word problems for a math student, grounded in the course material provided. "
@@ -562,12 +597,82 @@ class PracticeService:
         self._problems: "OrderedDict[str, PracticeProblem]" = OrderedDict()
         self._max_problems = 500
         self._stats = {"generated": 0, "solved": 0, "first_try": 0, "attempts": 0, "revealed": 0, "streak": 0, "best_streak": 0, "by_family": {}}
+        self._last_opened_id: Optional[str] = None
         self.is_initialized = False
 
+    def _practice_dir(self) -> Path:
+        path = Path(self.settings.data_dir) / "practice"
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "problems").mkdir(exist_ok=True)
+        (path / "boards").mkdir(exist_ok=True)
+        return path
+
+    @staticmethod
+    def _atomic_write(path: Path, payload: Any) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=0, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+
+    def _persist_problem(self, problem: PracticeProblem) -> None:
+        try:
+            self._atomic_write(self._practice_dir() / "problems" / f"{problem.id}.json", problem.record())
+            self._persist_index()
+        except OSError as exc:
+            logger.warning("Could not persist practice problem %s: %s", problem.id, exc)
+
+    def _persist_index(self) -> None:
+        try:
+            self._atomic_write(
+                self._practice_dir() / "index.json",
+                {"stats": self.stats(), "order": list(self._problems.keys()), "last_opened_id": self._last_opened_id},
+            )
+        except OSError as exc:
+            logger.warning("Could not persist practice index: %s", exc)
+
+    def _board_path(self, problem_id: str) -> Path:
+        return self._practice_dir() / "boards" / f"{problem_id}.json"
+
+    def _has_whiteboard(self, problem_id: str) -> bool:
+        return self._board_path(problem_id).exists()
+
+    def _load_persisted(self) -> None:
+        root = self._practice_dir()
+        index_path = root / "index.json"
+        if not index_path.exists():
+            return
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Practice index unreadable: %s", exc)
+            return
+        stats = index.get("stats") or {}
+        for key in self._stats:
+            if key == "by_family":
+                self._stats["by_family"] = dict(stats.get("by_family") or {})
+            elif key in stats:
+                try:
+                    self._stats[key] = int(stats[key])
+                except (TypeError, ValueError):
+                    pass
+        self._last_opened_id = index.get("last_opened_id")
+        loaded: "OrderedDict[str, PracticeProblem]" = OrderedDict()
+        for pid in index.get("order") or []:
+            rec = root / "problems" / f"{pid}.json"
+            if not rec.exists():
+                continue
+            try:
+                loaded[pid] = PracticeProblem.from_record(json.loads(rec.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError, TypeError) as exc:
+                logger.warning("Skipping practice problem %s: %s", pid, exc)
+        self._problems = loaded
+
     async def initialize(self) -> None:
+        self._load_persisted()
         self.is_initialized = True
 
     async def cleanup(self) -> None:
+        self._persist_index()
         self.is_initialized = False
 
     def is_healthy(self) -> bool:
@@ -587,6 +692,8 @@ class PracticeService:
             "families": self.families(),
             "difficulties": list(DIFFICULTIES),
             "stats": self.stats(),
+            "history_count": len(self._problems),
+            "last_opened_id": self._last_opened_id,
         }
 
     def stats(self) -> Dict[str, Any]:
@@ -665,6 +772,7 @@ class PracticeService:
         fam = self._stats["by_family"]
         fam[problem.family] = fam.get(problem.family, 0) + 1
         payload = problem.public()
+        payload["has_whiteboard"] = False
         payload["processing_time"] = round(time.perf_counter() - started, 3)
         return payload
 
@@ -757,13 +865,103 @@ class PracticeService:
 
     def _remember(self, problem: PracticeProblem) -> None:
         self._problems[problem.id] = problem
+        self._last_opened_id = problem.id
+        problem.last_opened_at = utc_now_iso()
         while len(self._problems) > self._max_problems:
-            self._problems.popitem(last=False)
+            evicted_id, _ = self._problems.popitem(last=False)
+            for leftover in (
+                self._practice_dir() / "problems" / f"{evicted_id}.json",
+                self._board_path(evicted_id),
+            ):
+                try:
+                    leftover.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        self._persist_problem(problem)
 
     # ---- interaction ----------------------------------------------------- #
 
-    def get(self, problem_id: str) -> Optional[PracticeProblem]:
-        return self._problems.get(problem_id)
+    def get(self, problem_id: str, *, touch: bool = False) -> Optional[PracticeProblem]:
+        problem = self._problems.get(problem_id)
+        if problem is None:
+            return None
+        if touch:
+            problem.last_opened_at = utc_now_iso()
+            self._last_opened_id = problem.id
+            self._persist_problem(problem)
+        return problem
+
+    def public_problem(self, problem_id: str, *, touch: bool = False) -> Optional[Dict[str, Any]]:
+        problem = self.get(problem_id, touch=touch)
+        if problem is None:
+            return None
+        payload = problem.public()
+        payload["has_whiteboard"] = self._has_whiteboard(problem.id)
+        return payload
+
+    def history(self, limit: int = 50) -> Dict[str, Any]:
+        limit = max(1, min(int(limit or 50), 200))
+        items = [
+            problem.summary(has_whiteboard=self._has_whiteboard(problem.id))
+            for problem in reversed(self._problems.values())
+        ][:limit]
+        return {
+            "items": items,
+            "total": len(self._problems),
+            "last_opened_id": self._last_opened_id,
+            "stats": self.stats(),
+        }
+
+    def delete_problem(self, problem_id: str) -> bool:
+        problem = self._problems.pop(problem_id, None)
+        if problem is None:
+            return False
+        for leftover in (self._practice_dir() / "problems" / f"{problem_id}.json", self._board_path(problem_id)):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if self._last_opened_id == problem_id:
+            self._last_opened_id = next(reversed(self._problems), None)
+        self._persist_index()
+        return True
+
+    def clear_history(self) -> None:
+        root = self._practice_dir()
+        self._problems.clear()
+        self._last_opened_id = None
+        self._stats = {"generated": 0, "solved": 0, "first_try": 0, "attempts": 0, "revealed": 0, "streak": 0, "best_streak": 0, "by_family": {}}
+        for folder in (root / "problems", root / "boards"):
+            for path in folder.glob("*.json"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        self._persist_index()
+
+    def save_whiteboard(self, problem_id: str, canvas_json: str) -> Dict[str, Any]:
+        problem = self._problems.get(problem_id)
+        if problem is None:
+            raise KeyError(problem_id)
+        if not isinstance(canvas_json, str) or len(canvas_json) > 2_000_000:
+            raise ValueError("Whiteboard snapshot is missing or too large.")
+        self._atomic_write(self._board_path(problem_id), {"canvas_json": canvas_json, "saved_at": utc_now_iso()})
+        problem.last_opened_at = utc_now_iso()
+        self._last_opened_id = problem.id
+        self._persist_index()
+        return {"problem_id": problem_id, "saved": True, "saved_at": utc_now_iso()}
+
+    def load_whiteboard(self, problem_id: str) -> Dict[str, Any]:
+        if problem_id not in self._problems:
+            raise KeyError(problem_id)
+        path = self._board_path(problem_id)
+        if not path.exists():
+            return {"problem_id": problem_id, "canvas_json": None, "saved_at": None}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"problem_id": problem_id, "canvas_json": None, "saved_at": None}
+        return {"problem_id": problem_id, "canvas_json": data.get("canvas_json"), "saved_at": data.get("saved_at")}
 
     def check(self, problem_id: str, answer: str) -> Dict[str, Any]:
         problem = self._problems.get(problem_id)
@@ -795,6 +993,7 @@ class PracticeService:
             }
 
         problem.attempts += 1
+        problem.last_attempt = answer
         self._stats["attempts"] += 1
         try:
             result = math_engine.solve(problem.equation)
@@ -837,6 +1036,7 @@ class PracticeService:
                 next_hint = problem.hints[problem.hints_used]
                 problem.hints_used += 1
 
+        self._persist_problem(problem)
         return {
             "problem_id": problem.id,
             "correct": correct,
@@ -858,6 +1058,7 @@ class PracticeService:
             raise KeyError(problem_id)
         if problem.hints_used < len(problem.hints):
             problem.hints_used += 1
+            self._persist_problem(problem)
         return {
             "problem_id": problem.id,
             "hints": problem.hints[: problem.hints_used],
@@ -876,6 +1077,7 @@ class PracticeService:
             self._stats["revealed"] += 1
             if not problem.solved:
                 self._stats["streak"] = 0
+            self._persist_problem(problem)
         extra: List[str] = []
         if result.problem_type == "equation" and isinstance(result.result, (list, tuple, set)) and len(result.result) > 1:
             extra.append(
@@ -894,3 +1096,79 @@ class PracticeService:
             "stats": self.stats(),
             "timestamp": utc_now_iso(),
         }
+
+    def interpret_board(self, texts: Sequence[str], problem_id: Optional[str] = None) -> Dict[str, Any]:
+        """Read typed math off the whiteboard. Never spends an attempt."""
+        lines: List[str] = []
+        for blob in texts or []:
+            for line in str(blob).replace("\r", "").split("\n"):
+                line = line.strip()
+                if line:
+                    lines.append(line)
+        problem = self._problems.get(problem_id) if problem_id else None
+        candidate = None
+        for line in reversed(lines):
+            if problem and line == problem.problem.strip():
+                continue
+            if _MATHISH.search(line) and len(line) <= 240:
+                candidate = line
+                break
+
+        reading: Optional[Dict[str, Any]] = None
+        setup: Optional[Dict[str, Any]] = None
+        preview: Optional[Dict[str, Any]] = None
+        if candidate:
+            try:
+                result = math_engine.solve(candidate)
+                reading = {
+                    "input": candidate,
+                    "solution": result.solution,
+                    "solution_latex": result.solution_latex,
+                    "steps": list(result.steps),
+                    "problem_type": result.problem_type,
+                    "confidence": result.confidence,
+                }
+            except MathParseError as exc:
+                reading = {"input": candidate, "error": str(exc), "solution": None, "steps": [], "problem_type": None, "confidence": 0}
+
+            if problem is not None:
+                try:
+                    intended = math_engine.solve(problem.equation)
+                    written = math_engine.solve(candidate)
+                    same = intended.solution == written.solution
+                    setup = {
+                        "matches_model": same,
+                        "feedback": "That is the modelling equation (or an equivalent one)." if same else "Readable, but not the same set-up as the intended equation.",
+                    }
+                except MathParseError:
+                    setup = None
+                preview = self._preview_answer(problem, candidate)
+
+        return {
+            "texts": lines,
+            "candidate": candidate,
+            "reading": reading,
+            "setup": setup,
+            "preview": preview,
+            "timestamp": utc_now_iso(),
+        }
+
+    def _preview_answer(self, problem: PracticeProblem, answer: str) -> Optional[Dict[str, Any]]:
+        try:
+            proposed = math_engine._parse_proposed_values(answer)  # noqa: SLF001
+        except MathParseError:
+            return None
+        if not proposed:
+            return None
+        try:
+            result = math_engine.solve(problem.equation)
+            intended = math_engine.parse_expression(problem.answer)
+            intended_ok = any(_equal(p, intended) for p in proposed)
+        except MathParseError:
+            return None
+        matches_set, matched_root = (intended_ok, intended_ok) if intended_ok else _answer_matches(result, answer)
+        if intended_ok or (matches_set and result.problem_type != "equation"):
+            return {"correct": True, "feedback": "That looks like the right answer — press Check to save it."}
+        if matched_root:
+            return {"correct": False, "feedback": "That value solves the equation, but it may not fit this situation."}
+        return {"correct": False, "feedback": "Readable, but it does not match the intended answer yet."}

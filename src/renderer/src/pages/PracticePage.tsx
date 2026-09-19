@@ -26,12 +26,13 @@ import { styled } from '@mui/material/styles';
 import { BlockMath } from 'react-katex';
 import 'katex/dist/katex.min.css';
 import { CourseMaterialPanel } from '../components/CourseMaterialPanel';
+import { PracticeHistory } from '../components/PracticeHistory';
 import { useSettingsContext } from '../contexts/SettingsContext';
 import { useWebSocketContext } from '../contexts/WebSocketContext';
 import { ApiError, apiFetch, apiJson } from '../lib/backend';
 import { describeLLMName } from '../lib/llm';
 import { canSpeak, prefers, speak, styleLabel, toBackendStyle } from '../lib/vark';
-import type { KnowledgeDocument, PracticeCheck, PracticeDifficulty, PracticeProblem, PracticeSolution, PracticeStats, PracticeStatus } from '../types/MathTypes';
+import type { KnowledgeDocument, PracticeCheck, PracticeDifficulty, PracticeHistory as HistoryPayload, PracticeProblem, PracticeSolution, PracticeStats, PracticeStatus } from '../types/MathTypes';
 import type { WhiteboardHandoff } from './MathTutorPage';
 
 const Layout = styled(Box)(({ theme }) => ({
@@ -100,10 +101,48 @@ export const PracticePage: React.FC = () => {
   const [solution, setSolution] = useState<PracticeSolution | null>(null);
   const [stats, setStats] = useState<PracticeStats | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistoryPayload | null>(null);
   const answerRef = useRef<HTMLInputElement>(null);
+  const restoredRef = useRef(false);
 
   // Re-read status when the language model source changes (backend pushes new capabilities).
   const llmName = capabilities?.llm_name ?? null;
+
+  const refreshHistory = useCallback(async () => {
+    try {
+      const next = await apiFetch<HistoryPayload>('/api/practice/history');
+      setHistory(next);
+      setStats(next.stats);
+      return next;
+    } catch (err) {
+      setError(describe(err));
+      return null;
+    }
+  }, []);
+
+  const applyProblem = useCallback((next: PracticeProblem) => {
+    setProblem(next);
+    setHints(next.hints);
+    setShowEquation(practiceSettings.showEquationImmediately || next.revealed);
+    setShowSketch(likesVisual && Boolean(next.sketch));
+    setLastCheck(null);
+    setSolution(null);
+    setAnswer(next.last_attempt || '');
+  }, [likesVisual, practiceSettings.showEquationImmediately]);
+
+  const openSaved = useCallback(
+    async (id: string) => {
+      try {
+        const next = await apiFetch<PracticeProblem>(`/api/practice/problems/${id}`);
+        applyProblem(next);
+        await refreshHistory();
+      } catch (err) {
+        setError(describe(err));
+      }
+    },
+    [applyProblem, refreshHistory],
+  );
+
   useEffect(() => {
     apiFetch<PracticeStatus>('/api/practice/status')
       .then((s) => {
@@ -112,6 +151,14 @@ export const PracticePage: React.FC = () => {
       })
       .catch((err) => setError(describe(err)));
   }, [llmName]);
+
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    void refreshHistory().then((hist) => {
+      if (hist?.last_opened_id) void openSaved(hist.last_opened_id);
+    });
+  }, [openSaved, refreshHistory]);
 
   const difficulty = practiceSettings.difficulty;
   const setDifficulty = (d: PracticeDifficulty) => void updatePracticeSettings({ difficulty: d });
@@ -131,17 +178,15 @@ export const PracticePage: React.FC = () => {
         mode: practiceSettings.preferLanguageModel ? 'auto' : 'templates',
         learning_style: toBackendStyle(learningStyle),
       });
-      setProblem(next);
-      setHints(next.hints);
-      setShowEquation(practiceSettings.showEquationImmediately);
-      setShowSketch(likesVisual && Boolean(next.sketch));
+      applyProblem(next);
+      await refreshHistory();
       setTimeout(() => answerRef.current?.focus(), 50);
     } catch (err) {
       setError(describe(err));
     } finally {
       setGenerating(false);
     }
-  }, [difficulty, family, learningStyle, likesVisual, practiceSettings.preferLanguageModel, practiceSettings.showEquationImmediately, selectedDocs, topic]);
+  }, [applyProblem, difficulty, family, learningStyle, practiceSettings.preferLanguageModel, refreshHistory, selectedDocs, topic]);
 
   const check = useCallback(async () => {
     if (!problem || !answer.trim() || checking) return;
@@ -152,6 +197,7 @@ export const PracticePage: React.FC = () => {
       setLastCheck(verdict);
       setStats(verdict.stats);
       if (verdict.hint) setHints((h) => (h.includes(verdict.hint as string) ? h : [...h, verdict.hint as string]));
+      void refreshHistory();
       if (verdict.correct) setProblem((p) => (p ? { ...p, solved: true, attempts: verdict.attempts } : p));
       else setProblem((p) => (p ? { ...p, attempts: verdict.attempts } : p));
     } catch (err) {
@@ -163,7 +209,7 @@ export const PracticePage: React.FC = () => {
     } finally {
       setChecking(false);
     }
-  }, [answer, checking, problem]);
+  }, [answer, checking, problem, refreshHistory]);
 
   const requestHint = useCallback(async () => {
     if (!problem) return;
@@ -187,13 +233,10 @@ export const PracticePage: React.FC = () => {
     }
   }, [problem]);
 
-  const toWhiteboard = () => {
-    if (!problem) return;
-    const state: WhiteboardHandoff = {
-      whiteboardText: `${problem.problem}${showEquation ? `\n\nEquation: ${problem.equation}` : ''}`,
-      prefillInput: showEquation ? problem.equation : undefined,
-    };
-    navigate('/', { state });
+  const toWhiteboard = (id?: string) => {
+    const problemId = id || problem?.id;
+    if (!problemId) return;
+    navigate('/', { state: { problemId } as WhiteboardHandoff });
   };
 
   const families = status?.families ?? [];
@@ -282,8 +325,8 @@ export const PracticePage: React.FC = () => {
                   </Button>
                 </Tooltip>
               )}
-              <Tooltip title="Send the problem to the whiteboard to work it out by hand">
-                <Button size="small" variant={likesKinesthetic ? 'contained' : 'text'} startIcon={<Draw />} onClick={toWhiteboard} sx={{ textTransform: 'none' }}>
+              <Tooltip title="Open this problem on the whiteboard — it stays in the top decks, the board is for working">
+                <Button size="small" variant={likesKinesthetic ? 'contained' : 'text'} startIcon={<Draw />} onClick={() => toWhiteboard()} sx={{ textTransform: 'none' }}>
                   Work on whiteboard
                 </Button>
               </Tooltip>
@@ -338,7 +381,7 @@ export const PracticePage: React.FC = () => {
 
             <Collapse in={showSketch && Boolean(problem.sketch)}>
               <Alert severity="info" icon={<Gesture fontSize="inherit" />} sx={{ mt: 2 }} action={
-                <Button size="small" color="inherit" onClick={toWhiteboard} sx={{ textTransform: 'none' }}>
+                <Button size="small" color="inherit" onClick={() => toWhiteboard()} sx={{ textTransform: 'none' }}>
                   Open whiteboard
                 </Button>
               }>
@@ -469,6 +512,39 @@ export const PracticePage: React.FC = () => {
         </Paper>
 
         <CourseMaterialPanel selectedIds={selectedDocs} onSelectionChange={setSelectedDocs} onDocumentsChange={setDocuments} dense />
+
+        <Paper elevation={1} sx={{ p: 2, flex: 1, minHeight: 0, overflow: 'auto' }}>
+          <PracticeHistory
+            history={history}
+            activeId={problem?.id ?? null}
+            onOpen={(id) => void openSaved(id)}
+            onWhiteboard={(id) => toWhiteboard(id)}
+            onDelete={(id) => {
+              void apiFetch(`/api/practice/problems/${id}`, { method: 'DELETE' })
+                .then(() => {
+                  if (problem?.id === id) {
+                    setProblem(null);
+                    setHints([]);
+                    setSolution(null);
+                    setLastCheck(null);
+                  }
+                  return refreshHistory();
+                })
+                .catch((err) => setError(describe(err)));
+            }}
+            onClear={() => {
+              void apiFetch('/api/practice/history', { method: 'DELETE' })
+                .then(() => {
+                  setProblem(null);
+                  setHints([]);
+                  setSolution(null);
+                  setLastCheck(null);
+                  return refreshHistory();
+                })
+                .catch((err) => setError(describe(err)));
+            }}
+          />
+        </Paper>
       </SidePane>
     </Layout>
   );

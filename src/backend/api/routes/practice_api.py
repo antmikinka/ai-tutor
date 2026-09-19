@@ -42,10 +42,19 @@ class CheckRequest(BaseModel):
     answer: str = Field(min_length=1, max_length=500)
 
 
-def _get(service: PracticeService, problem_id: str):
-    problem = service.get(problem_id)
+class WhiteboardSaveRequest(BaseModel):
+    canvas_json: str = Field(min_length=2, max_length=2_000_000)
+
+
+class BoardReadRequest(BaseModel):
+    texts: List[str] = Field(default_factory=list, max_length=40)
+    problem_id: Optional[str] = None
+
+
+def _get(service: PracticeService, problem_id: str, *, touch: bool = False):
+    problem = service.get(problem_id, touch=touch)
     if problem is None:
-        raise HTTPException(status_code=404, detail="Problem not found (it may have expired). Generate a new one.")
+        raise HTTPException(status_code=404, detail="Problem not found (it may have expired). Open it from History or generate a new one.")
     return problem
 
 
@@ -71,9 +80,52 @@ async def generate_problem(request: GenerateRequest, service: PracticeService = 
         raise HTTPException(status_code=500, detail=f"Could not generate a problem: {exc}")
 
 
+@router.get("/history")
+async def practice_history(limit: int = 50, service: PracticeService = Depends(get_practice_service)) -> Dict[str, Any]:
+    return service.history(limit)
+
+
+@router.delete("/history")
+async def clear_practice_history(service: PracticeService = Depends(get_practice_service)) -> Dict[str, Any]:
+    service.clear_history()
+    return {"cleared": True, "stats": service.stats()}
+
+
 @router.get("/problems/{problem_id}")
 async def get_problem(problem_id: str, service: PracticeService = Depends(get_practice_service)) -> Dict[str, Any]:
-    return _get(service, problem_id).public()
+    payload = service.public_problem(problem_id, touch=True)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Problem not found (it may have expired). Open it from History or generate a new one.")
+    return payload
+
+
+@router.delete("/problems/{problem_id}")
+async def delete_problem(problem_id: str, service: PracticeService = Depends(get_practice_service)) -> Dict[str, Any]:
+    if not service.delete_problem(problem_id):
+        raise HTTPException(status_code=404, detail="Problem not found.")
+    return {"deleted": problem_id, "stats": service.stats()}
+
+
+@router.put("/problems/{problem_id}/whiteboard")
+async def save_whiteboard(problem_id: str, request: WhiteboardSaveRequest, service: PracticeService = Depends(get_practice_service)) -> Dict[str, Any]:
+    _get(service, problem_id)
+    try:
+        return service.save_whiteboard(problem_id, request.canvas_json)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/problems/{problem_id}/whiteboard")
+async def load_whiteboard(problem_id: str, service: PracticeService = Depends(get_practice_service)) -> Dict[str, Any]:
+    _get(service, problem_id)
+    return service.load_whiteboard(problem_id)
+
+
+@router.post("/read-board")
+async def read_board(request: BoardReadRequest, service: PracticeService = Depends(get_practice_service)) -> Dict[str, Any]:
+    if request.problem_id:
+        _get(service, request.problem_id)
+    return service.interpret_board(request.texts, request.problem_id)
 
 
 @router.post("/problems/{problem_id}/check")

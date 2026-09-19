@@ -20,6 +20,12 @@ interface DrawingCanvasProps {
   onSelectionChange?: (hasSelection: boolean) => void;
 }
 
+export interface CanvasReadable {
+  texts: string[];
+  objectCount: number;
+  kinds: Record<string, number>;
+}
+
 export interface DrawingCanvasRef {
   getCanvas: () => fabric.Canvas | null;
   clear: () => void;
@@ -30,6 +36,8 @@ export interface DrawingCanvasRef {
   deleteSelection: () => boolean;
   /** Place a text block on the canvas (used to bring a practice problem onto the whiteboard). */
   addText: (text: string, options?: { fontSize?: number; color?: string; top?: number }) => void;
+  /** Typed text plus a count of each object kind currently on the board. */
+  getReadable: () => CanvasReadable;
   toDataURL: (options?: { multiplier?: number }) => string;
   toJSON: () => string;
   loadJSON: (json: string) => Promise<void>;
@@ -384,6 +392,20 @@ export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
           });
           canvas.add(textbox);
           canvas.requestRenderAll();
+          scheduleCommit();
+        },
+        getReadable: () => {
+          const canvas = fabricRef.current;
+          if (!canvas) return { texts: [], objectCount: 0, kinds: {} };
+          const kinds: Record<string, number> = {};
+          const texts: string[] = [];
+          canvas.getObjects().forEach((obj) => {
+            const type = obj.type || 'object';
+            kinds[type] = (kinds[type] || 0) + 1;
+            const text = (obj as fabric.IText).text;
+            if (typeof text === 'string' && text.trim()) texts.push(text.trim());
+          });
+          return { texts, objectCount: canvas.getObjects().length, kinds };
         },
         undo: () => {
           if (historyIndexRef.current <= 0) return;

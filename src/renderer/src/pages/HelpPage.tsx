@@ -61,8 +61,8 @@ const FEATURES = [
     icon: <School />,
     title: 'Practice (learn by doing)',
     description:
-      'Upload lecture notes or a textbook chapter and the tutor writes word problems from that material. Set up the equation yourself, check your answer, ask for hints, then compare with the modelling equation and worked solution.',
-    tags: ['Chroma course index', 'Engine-verified problems', 'Hints & streaks'],
+      'Upload lecture notes or a textbook chapter and the tutor writes word problems from that material. Every problem is saved in History. Work on whiteboard pins the word problem and the equation in two decks at the top — the canvas below is only for working, and typed math is read live.',
+    tags: ['Saved history', 'Two-deck whiteboard', 'Engine-verified problems'],
   },
   {
     icon: <QuestionAnswer />,
@@ -110,6 +110,10 @@ const FAQ = [
   {
     q: 'Where does my API key go, and what is sent to the provider?',
     a: 'The key is saved on this computer only (in the backend data folder, readable by your user account) and is sent solely to the provider base URL you configured. When the API answers a question, the problem text is sent; for practice generation, the retrieved passages from your course material are included so the problem matches what you are studying. In "Local" mode nothing leaves your machine.',
+  },
+  {
+    q: 'Where does a practice problem go when I press Work on whiteboard?',
+    a: 'It does not get pasted onto the drawing. The whiteboard is split: the top-left deck holds the word problem, the top-right deck holds the equation (hidden until you ask) and a live reading of whatever you type on the board, and the canvas underneath is only for working. The problem is also saved in Practice → History, so you can reopen it later — including the drawing, if you made one.',
   },
   {
     q: 'What does my learning style actually change?',

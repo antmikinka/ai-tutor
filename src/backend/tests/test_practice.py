@@ -72,8 +72,12 @@ class FakeAI:
 
 
 @pytest.fixture
-def service(settings):
-    svc = ps.PracticeService(settings, knowledge=None, ai=None)
+def service(settings, tmp_path):
+    from config.settings import create_settings
+
+    s = create_settings(**{**settings.model_dump(), "data_dir": tmp_path / "practice-data"})
+    s.ensure_directories()
+    svc = ps.PracticeService(s, knowledge=None, ai=None)
     asyncio.run(svc.initialize())
     return svc
 
@@ -227,3 +231,56 @@ def test_practice_api_flow(client):
 
     assert client.post("/api/practice/problems/missing/check", json={"answer": "1"}).status_code == 404
     assert client.post("/api/practice/generate", json={"difficulty": "impossible"}).status_code == 422
+
+
+def test_practice_history_survives_reload(settings, tmp_path):
+    from config.settings import create_settings
+
+    s = create_settings(**{**settings.model_dump(), "data_dir": tmp_path / "hist"})
+    s.ensure_directories()
+    first = ps.PracticeService(s, knowledge=None, ai=None)
+    asyncio.run(first.initialize())
+    problem = asyncio.run(first.generate("percent", "easy", seed=2))
+    stored = first.get(problem["id"])
+    first.check(problem["id"], stored.answer)
+    first.save_whiteboard(problem["id"], '{"objects":[]}')
+    asyncio.run(first.cleanup())
+
+    again = ps.PracticeService(s, knowledge=None, ai=None)
+    asyncio.run(again.initialize())
+    history = again.history()
+    assert history["total"] == 1
+    assert history["items"][0]["id"] == problem["id"]
+    assert history["items"][0]["solved"] is True
+    assert history["items"][0]["has_whiteboard"] is True
+    assert again.get(problem["id"]).answer == stored.answer
+    assert again.load_whiteboard(problem["id"])["canvas_json"] == '{"objects":[]}'
+    assert again.stats()["solved"] == 1
+
+
+def test_interpret_board_does_not_spend_an_attempt(service):
+    problem = asyncio.run(service.generate("consecutive integers", "easy", family="linear", seed=3))
+    stored = service.get(problem["id"])
+    reading = service.interpret_board([f"{stored.variable} = {stored.answer}"], problem["id"])
+    assert reading["preview"]["correct"] is True
+    assert service.get(problem["id"]).attempts == 0
+    reading2 = service.interpret_board([stored.equation], problem["id"])
+    assert reading2["reading"]["solution"]
+    assert reading2["setup"]["matches_model"] is True
+
+
+def test_practice_history_api(client):
+    generated = client.post("/api/practice/generate", json={"topic": "area", "mode": "templates", "seed": 4}).json()
+    pid = generated["id"]
+    listed = client.get("/api/practice/history").json()
+    assert any(item["id"] == pid for item in listed["items"])
+    assert "answer" not in listed["items"][0]
+    saved = client.put(f"/api/practice/problems/{pid}/whiteboard", json={"canvas_json": '{"version":"1","objects":[]}'})
+    assert saved.status_code == 200
+    board = client.get(f"/api/practice/problems/{pid}/whiteboard").json()
+    assert board["canvas_json"]
+    read = client.post("/api/practice/read-board", json={"texts": ["2 + 2 = x"], "problem_id": pid}).json()
+    assert read["candidate"] == "2 + 2 = x"
+    assert read["reading"]["solution"]
+    assert client.delete(f"/api/practice/problems/{pid}").status_code == 200
+    assert client.get(f"/api/practice/problems/{pid}").status_code == 404

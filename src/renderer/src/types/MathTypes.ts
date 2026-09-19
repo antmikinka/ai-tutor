@@ -183,7 +183,49 @@ export interface PracticeProblem {
   solved: boolean;
   revealed: boolean;
   created_at: string;
+  last_opened_at?: string | null;
+  last_attempt?: string | null;
+  has_whiteboard?: boolean;
   processing_time?: number;
+}
+
+export interface PracticeHistoryItem {
+  id: string;
+  topic: string;
+  difficulty: PracticeDifficulty;
+  family: string;
+  family_label: string;
+  concept: string;
+  preview: string;
+  attempts: number;
+  solved: boolean;
+  revealed: boolean;
+  created_at: string;
+  last_opened_at: string | null;
+  has_whiteboard: boolean;
+}
+
+export interface PracticeHistory {
+  items: PracticeHistoryItem[];
+  total: number;
+  last_opened_id: string | null;
+  stats: PracticeStats;
+}
+
+export interface BoardReading {
+  texts: string[];
+  candidate: string | null;
+  reading: {
+    input: string;
+    solution: string | null;
+    solution_latex?: string;
+    steps: string[];
+    problem_type: string | null;
+    confidence: number;
+    error?: string;
+  } | null;
+  setup: { matches_model: boolean; feedback: string } | null;
+  preview: { correct: boolean; feedback: string } | null;
 }
 
 export interface PracticeStats {
@@ -232,6 +274,8 @@ export interface PracticeStatus {
   families: Array<{ id: string; label: string; keywords: string[] }>;
   difficulties: PracticeDifficulty[];
   stats: PracticeStats;
+  history_count?: number;
+  last_opened_id?: string | null;
 }
 
 // ---- language model source (/api/llm) -------------------------------------
