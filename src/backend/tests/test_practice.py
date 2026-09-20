@@ -263,10 +263,22 @@ def test_interpret_board_does_not_spend_an_attempt(service):
     stored = service.get(problem["id"])
     reading = service.interpret_board([f"{stored.variable} = {stored.answer}"], problem["id"])
     assert reading["preview"]["correct"] is True
+    assert reading["setup"] is None
+    assert reading["reading"]["solution"] is None  # do not echo the answer as a solved result
     assert service.get(problem["id"]).attempts == 0
     reading2 = service.interpret_board([stored.equation], problem["id"])
-    assert reading2["reading"]["solution"]
     assert reading2["setup"]["matches_model"] is True
+    assert reading2["reading"]["solution"] is None  # writing the set-up must not spoil the unknown
+    scratch = service.interpret_board(["2 + 2"], problem["id"])
+    assert scratch["reading"]["solution"] and "4" in scratch["reading"]["solution"]
+    assert scratch["setup"] is None and scratch["preview"] is None
+
+
+def test_equations_equivalent_does_not_treat_the_answer_as_the_set_up():
+    assert ps._equations_equivalent("x*(1 - 40/100) = 120", "3*x/5 = 120") is True
+    assert ps._looks_like_final_answer("x = 200") is True
+    assert ps._looks_like_final_answer("x*(1 - 40/100) = 120") is False
+    assert ps._equations_equivalent("2*d + 3 = 17", "2*d = 14") is True
 
 
 def test_practice_history_api(client):

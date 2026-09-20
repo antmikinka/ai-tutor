@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import re
+import stat
 import time
 import uuid
 from collections import OrderedDict
@@ -451,6 +453,36 @@ def _answer_matches(result: math_engine.MathResult, answer: str) -> Tuple[bool, 
     return False, False
 
 
+_FINAL_ANSWER = re.compile(r"^(?:[A-Za-z]\s*=\s*)?-?\d+(?:\.\d+)?$")
+
+
+def _looks_like_final_answer(text: str) -> bool:
+    """A bare number or ``x = 200`` — the *result*, not a modelling equation."""
+    return bool(_FINAL_ANSWER.match(math_engine.normalize_text(text).replace(" ", "")))
+
+
+def _equations_equivalent(left: str, right: str) -> bool:
+    """True when both sides describe the same relation (constant multiple of lhs-rhs)."""
+    try:
+        eq1 = math_engine.parse_equation(left)
+        eq2 = math_engine.parse_equation(right)
+    except MathParseError:
+        return False
+    if not isinstance(eq1, sp.Eq) or not isinstance(eq2, sp.Eq):
+        return False
+    d1 = sp.expand(sp.together(eq1.lhs - eq1.rhs))
+    d2 = sp.expand(sp.together(eq2.lhs - eq2.rhs))
+    if d1 == 0 and d2 == 0:
+        return True
+    if d1 == 0 or d2 == 0:
+        return False
+    try:
+        ratio = sp.simplify(d1 / d2)
+        return bool(ratio.is_number and ratio != 0)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _equal(a: sp.Basic, b: sp.Basic) -> bool:
     try:
         diff = sp.simplify(a - b)
@@ -612,6 +644,10 @@ class PracticeService:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, indent=0, ensure_ascii=False), encoding="utf-8")
+        try:
+            os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
         tmp.replace(path)
 
     def _persist_problem(self, problem: PracticeProblem) -> None:
@@ -1098,7 +1134,7 @@ class PracticeService:
         }
 
     def interpret_board(self, texts: Sequence[str], problem_id: Optional[str] = None) -> Dict[str, Any]:
-        """Read typed math off the whiteboard. Never spends an attempt."""
+        """Read typed math off the whiteboard. Never spends an attempt, never spoils the answer."""
         lines: List[str] = []
         for blob in texts or []:
             for line in str(blob).replace("\r", "").split("\n"):
@@ -1131,18 +1167,30 @@ class PracticeService:
             except MathParseError as exc:
                 reading = {"input": candidate, "error": str(exc), "solution": None, "steps": [], "problem_type": None, "confidence": 0}
 
-            if problem is not None:
-                try:
-                    intended = math_engine.solve(problem.equation)
-                    written = math_engine.solve(candidate)
-                    same = intended.solution == written.solution
+            if problem is not None and reading is not None:
+                same_setup = (
+                    "=" in candidate
+                    and not _looks_like_final_answer(candidate)
+                    and _equations_equivalent(candidate, problem.equation)
+                )
+                preview = (
+                    None
+                    if same_setup or not _looks_like_final_answer(candidate)
+                    else self._preview_answer(problem, candidate)
+                )
+                if same_setup:
                     setup = {
-                        "matches_model": same,
-                        "feedback": "That is the modelling equation (or an equivalent one)." if same else "Readable, but not the same set-up as the intended equation.",
+                        "matches_model": True,
+                        "feedback": "That is the modelling equation (or an equivalent one). Now find the unknown — the board will not solve it for you.",
                     }
-                except MathParseError:
+                    reading = {**reading, "solution": None, "solution_latex": "", "steps": []}
+                elif preview is not None:
+                    # They wrote a value / x = value. Don't also claim it is (or isn't) the set-up,
+                    # and don't echo the solved form as if the tutor just did the work.
                     setup = None
-                preview = self._preview_answer(problem, candidate)
+                    reading = {**reading, "solution": None, "solution_latex": "", "steps": []}
+                else:
+                    setup = None  # scratch work: show what *their* line evaluates to
 
         return {
             "texts": lines,

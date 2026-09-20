@@ -173,7 +173,7 @@ export const PracticeDecks: React.FC<Props> = ({
                   {live.error}
                 </Typography>
               )}
-              {live?.solution && (
+              {live?.solution && !reading?.setup?.matches_model && !reading?.preview && (
                 <Typography variant="body2" sx={{ mt: 0.5 }}>
                   → {live.solution}
                 </Typography>

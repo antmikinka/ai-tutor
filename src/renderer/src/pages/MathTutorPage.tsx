@@ -453,8 +453,20 @@ export const MathTutorPage: React.FC = () => {
 
   useEffect(() => () => recorderRef.current?.stop(), []);
 
+  const persistBoard = useCallback(() => {
+    const id = sessionIdRef.current;
+    if (!id || canvasRef.current?.isEmpty()) return;
+    const json = canvasRef.current?.toJSON();
+    if (!json) return;
+    void apiJson(`/api/practice/problems/${id}/whiteboard`, 'PUT', { canvas_json: json }).catch(() => undefined);
+  }, []);
+
   const openProblem = useCallback(async (problemId: string, opts?: { restoreBoard?: boolean }) => {
     try {
+      if (sessionIdRef.current && sessionIdRef.current !== problemId) {
+        persistBoard();
+      }
+      setReading(null);
       const next = await apiFetch<PracticeProblem>(`/api/practice/problems/${problemId}`);
       sessionIdRef.current = next.id;
       setSession(next);
@@ -475,18 +487,12 @@ export const MathTutorPage: React.FC = () => {
       } else {
         canvasRef.current?.clear();
       }
+      setBoardReady(true);
     } catch (error) {
       pushError(error);
+      setBoardReady(true);
     }
-  }, [pushError, settings.learningStyle.visual, settings.practiceSettings.showEquationImmediately]);
-
-  const persistBoard = useCallback(() => {
-    const id = sessionIdRef.current;
-    if (!id || canvasRef.current?.isEmpty()) return;
-    const json = canvasRef.current?.toJSON();
-    if (!json) return;
-    void apiJson(`/api/practice/problems/${id}/whiteboard`, 'PUT', { canvas_json: json }).catch(() => undefined);
-  }, []);
+  }, [persistBoard, pushError, settings.learningStyle.visual, settings.practiceSettings.showEquationImmediately]);
 
   const readBoard = useCallback(() => {
     const readable = canvasRef.current?.getReadable();
@@ -570,6 +576,7 @@ export const MathTutorPage: React.FC = () => {
     if (state?.whiteboardText || state?.prefillInput) {
       if (state.prefillInput) setInput(state.prefillInput);
       navigate(location.pathname, { replace: true, state: null });
+      setBoardReady(true);
       return;
     }
     if (sessionIdRef.current) return;
