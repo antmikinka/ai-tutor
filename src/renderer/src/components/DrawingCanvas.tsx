@@ -1,14 +1,29 @@
-import React, { useEffect, useRef, forwardRef, useImperativeHandle, useCallback } from 'react';
-import { Box } from '@mui/material';
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { Box, Typography } from '@mui/material';
+import { alpha } from '@mui/material/styles';
 import { fabric } from 'fabric';
+import type { WhiteboardGrid } from '../types/MathTypes';
+
+export type DrawingTool = 'pen' | 'eraser' | 'select' | 'text' | 'rect' | 'ellipse' | 'line';
 
 interface DrawingCanvasProps {
-  tool: 'pen' | 'eraser' | 'text' | 'shape';
+  tool: DrawingTool;
   color: string;
   lineWidth: number;
-  onChange?: (canvasData: string) => void;
-  width?: number;
-  height?: number;
+  /** Background guide; drawn with CSS so it never appears in exported images. */
+  grid?: WhiteboardGrid;
+  /** Shown centred on the canvas while it is empty. */
+  emptyHint?: React.ReactNode;
+  /** Debounced notification that the drawing changed. Call `toDataURL()` if you need pixels. */
+  onChange?: (info: { isEmpty: boolean }) => void;
+  onHistoryChange?: (state: { canUndo: boolean; canRedo: boolean }) => void;
+  onSelectionChange?: (hasSelection: boolean) => void;
+}
+
+export interface CanvasReadable {
+  texts: string[];
+  objectCount: number;
+  kinds: Record<string, number>;
 }
 
 export interface DrawingCanvasRef {
@@ -16,333 +31,457 @@ export interface DrawingCanvasRef {
   clear: () => void;
   undo: () => void;
   redo: () => void;
-  toDataURL: () => string;
-  setDrawingMode: (isDrawing: boolean) => void;
+  isEmpty: () => boolean;
+  /** Remove the currently selected object(s). Returns true if something was removed. */
+  deleteSelection: () => boolean;
+  /** Place a text block on the canvas (used to bring a practice problem onto the whiteboard). */
+  addText: (text: string, options?: { fontSize?: number; color?: string; top?: number }) => void;
+  /** Typed text plus a count of each object kind currently on the board. */
+  getReadable: () => CanvasReadable;
+  toDataURL: (options?: { multiplier?: number }) => string;
+  toJSON: () => string;
+  loadJSON: (json: string) => Promise<void>;
 }
 
-export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
-  ({ tool, color, lineWidth, onChange, width = '100%', height = '100%' }, ref) => {
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-    const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
-    const historyRef = useRef<string[]>([]);
-    const historyIndexRef = useRef<number>(-1);
+const HISTORY_LIMIT = 50;
+const CHANGE_DEBOUNCE_MS = 300;
+const BACKGROUND = '#ffffff';
+const GRID_SIZE = 24;
 
-    // Initialize Fabric.js canvas
-    useEffect(() => {
-      if (canvasRef.current) {
-        const parentElement = canvasRef.current.parentElement;
-        const canvasWidth = parentElement?.clientWidth || 800;
-        const canvasHeight = parentElement?.clientHeight || 600;
+// Guide colours are fixed rather than theme-derived: the whiteboard itself is
+// always white (exports must match what the student sees), so the guides must
+// read against white in both light and dark UI themes.
+const DOT_COLOR = 'rgba(25, 35, 126, 0.35)';
+const LINE_COLOR = 'rgba(25, 35, 126, 0.16)';
+const MAJOR_LINE_COLOR = 'rgba(25, 35, 126, 0.30)';
 
-        // Set canvas element dimensions
-        canvasRef.current.width = canvasWidth;
-        canvasRef.current.height = canvasHeight;
-
-        const canvas = new fabric.Canvas(canvasRef.current, {
-          isDrawingMode: tool === 'pen',
-          width: canvasWidth,
-          height: canvasHeight,
-          backgroundColor: '#ffffff',
-          selection: false,
-        });
-
-        // Set default drawing styles
-        if (tool === 'pen') {
-          canvas.freeDrawingBrush.color = color;
-          canvas.freeDrawingBrush.width = lineWidth;
-        }
-
-        // Canvas event handlers
-        canvas.on('path:created', () => {
-          saveCanvasState();
-          notifyChange();
-        });
-
-        canvas.on('object:added', () => {
-          saveCanvasState();
-          notifyChange();
-        });
-
-        canvas.on('object:modified', () => {
-          saveCanvasState();
-          notifyChange();
-        });
-
-        canvas.on('object:removed', () => {
-          saveCanvasState();
-          notifyChange();
-        });
-
-        fabricCanvasRef.current = canvas;
-        saveCanvasState();
-
-        // Handle window resize
-        const handleResize = () => {
-          if (canvasRef.current && canvasRef.current.parentElement) {
-            const parentElement = canvasRef.current.parentElement;
-            const newWidth = parentElement.clientWidth;
-            const newHeight = parentElement.clientHeight;
-
-            // Update canvas element dimensions
-            canvasRef.current.width = newWidth;
-            canvasRef.current.height = newHeight;
-
-            // Update Fabric.js canvas dimensions
-            canvas.setDimensions({
-              width: newWidth,
-              height: newHeight,
-            });
-
-            // Re-render canvas
-            canvas.renderAll();
-          }
-        };
-
-        window.addEventListener('resize', handleResize);
-
-        return () => {
-          canvas.dispose();
-          window.removeEventListener('resize', handleResize);
-        };
-      }
-    }, []); // Only run once on mount
-
-    const notifyChange = useCallback(() => {
-      if (onChange && fabricCanvasRef.current) {
-        onChange(fabricCanvasRef.current.toDataURL());
-      }
-    }, [onChange]);
-
-    const saveCanvasState = () => {
-      if (fabricCanvasRef.current) {
-        const json = JSON.stringify(fabricCanvasRef.current.toJSON());
-
-        // Remove any states after current index
-        historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1);
-
-        // Add new state
-        historyRef.current.push(json);
-        historyIndexRef.current = historyRef.current.length - 1;
-
-        // Limit history size
-        if (historyRef.current.length > 50) {
-          historyRef.current.shift();
-          historyIndexRef.current--;
-        }
-      }
+const gridBackground = (grid: WhiteboardGrid): Record<string, string> => {
+  if (grid === 'dots') {
+    return {
+      backgroundImage: `radial-gradient(circle, ${DOT_COLOR} 1.6px, transparent 2.2px)`,
+      backgroundSize: `${GRID_SIZE}px ${GRID_SIZE}px`,
+      backgroundPosition: `${GRID_SIZE / 2}px ${GRID_SIZE / 2}px`,
     };
+  }
+  if (grid === 'lines') {
+    const major = GRID_SIZE * 5;
+    return {
+      backgroundImage: [
+        `linear-gradient(${MAJOR_LINE_COLOR} 1px, transparent 1px)`,
+        `linear-gradient(90deg, ${MAJOR_LINE_COLOR} 1px, transparent 1px)`,
+        `linear-gradient(${LINE_COLOR} 1px, transparent 1px)`,
+        `linear-gradient(90deg, ${LINE_COLOR} 1px, transparent 1px)`,
+      ].join(', '),
+      backgroundSize: `${major}px ${major}px, ${major}px ${major}px, ${GRID_SIZE}px ${GRID_SIZE}px, ${GRID_SIZE}px ${GRID_SIZE}px`,
+    };
+  }
+  return {};
+};
 
-    // Update drawing mode and styles when tool changes
+/**
+ * Fabric.js drawing surface.
+ *
+ * History is recorded once per user action (debounced) and suspended while a
+ * snapshot is being restored, so undo/redo behave predictably. Tool handlers
+ * are attached per tool and torn down on every tool change, so switching tools
+ * never leaves stale listeners behind. Size follows the parent element via
+ * ResizeObserver.
+ */
+export const DrawingCanvas = forwardRef<DrawingCanvasRef, DrawingCanvasProps>(
+  ({ tool, color, lineWidth, grid = 'none', emptyHint, onChange, onHistoryChange, onSelectionChange }, ref) => {
+    const hostRef = useRef<HTMLDivElement>(null);
+    const canvasElRef = useRef<HTMLCanvasElement>(null);
+    const fabricRef = useRef<fabric.Canvas | null>(null);
+    const [isEmpty, setIsEmpty] = useState(true);
+
+    const historyRef = useRef<string[]>([]);
+    const historyIndexRef = useRef(-1);
+    const restoringRef = useRef(false);
+    const changeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const onChangeRef = useRef(onChange);
+    const onHistoryChangeRef = useRef(onHistoryChange);
+    const onSelectionChangeRef = useRef(onSelectionChange);
+    const gridRef = useRef(grid);
+    onChangeRef.current = onChange;
+    onHistoryChangeRef.current = onHistoryChange;
+    onSelectionChangeRef.current = onSelectionChange;
+    gridRef.current = grid;
+
+    /** Fabric paints its own background; keep it transparent while a CSS grid shows through. */
+    const applyBackground = useCallback((canvas: fabric.Canvas) => {
+      canvas.backgroundColor = gridRef.current === 'none' ? BACKGROUND : '';
+    }, []);
+
+    const emitChange = useCallback((canvas: fabric.Canvas | null) => {
+      const empty = !canvas || canvas.getObjects().length === 0;
+      setIsEmpty(empty);
+      onChangeRef.current?.({ isEmpty: empty });
+    }, []);
+
+    const emitHistory = useCallback(() => {
+      onHistoryChangeRef.current?.({
+        canUndo: historyIndexRef.current > 0,
+        canRedo: historyIndexRef.current < historyRef.current.length - 1,
+      });
+    }, []);
+
+    const snapshot = useCallback(() => {
+      const canvas = fabricRef.current;
+      if (!canvas) return;
+      const json = JSON.stringify(canvas.toJSON());
+      if (historyRef.current[historyIndexRef.current] === json) return;
+      historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1);
+      historyRef.current.push(json);
+      if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
+      historyIndexRef.current = historyRef.current.length - 1;
+      emitHistory();
+    }, [emitHistory]);
+
+    /** Called for every fabric mutation; coalesces bursts into one history entry + one onChange. */
+    const scheduleCommit = useCallback(() => {
+      if (restoringRef.current) return;
+      if (changeTimerRef.current) clearTimeout(changeTimerRef.current);
+      changeTimerRef.current = setTimeout(() => {
+        changeTimerRef.current = null;
+        snapshot();
+        emitChange(fabricRef.current);
+      }, CHANGE_DEBOUNCE_MS);
+    }, [emitChange, snapshot]);
+
+    const restore = useCallback(
+      (json: string) =>
+        new Promise<void>((resolve) => {
+          const canvas = fabricRef.current;
+          if (!canvas) return resolve();
+          restoringRef.current = true;
+          canvas.loadFromJSON(json, () => {
+            applyBackground(canvas);
+            canvas.renderAll();
+            restoringRef.current = false;
+            emitChange(canvas);
+            resolve();
+          });
+        }),
+      [applyBackground, emitChange],
+    );
+
+    // ---- lifecycle -------------------------------------------------------
+
     useEffect(() => {
-      if (fabricCanvasRef.current) {
-        const canvas = fabricCanvasRef.current;
+      const host = hostRef.current;
+      const el = canvasElRef.current;
+      if (!host || !el) return;
 
-        switch (tool) {
-          case 'pen':
-            canvas.isDrawingMode = true;
-            canvas.freeDrawingBrush.color = color;
-            canvas.freeDrawingBrush.width = lineWidth;
-            canvas.selection = false;
-            break;
+      const canvas = new fabric.Canvas(el, {
+        width: host.clientWidth || 800,
+        height: host.clientHeight || 600,
+        backgroundColor: gridRef.current === 'none' ? BACKGROUND : '',
+        selection: false,
+        preserveObjectStacking: true,
+        enableRetinaScaling: true,
+        stopContextMenu: true,
+        fireRightClick: false,
+      });
+      fabricRef.current = canvas;
 
-          case 'eraser':
-            canvas.isDrawingMode = true;
-            canvas.freeDrawingBrush.color = '#ffffff';
-            canvas.freeDrawingBrush.width = lineWidth * 3;
-            canvas.selection = false;
-            break;
+      // Smoother freehand strokes: fabric's PencilBrush simplifies paths by this tolerance.
+      (canvas.freeDrawingBrush as fabric.PencilBrush & { decimate?: number }).decimate = 1.5;
 
-          case 'text':
-            canvas.isDrawingMode = false;
-            canvas.selection = true;
-            setupTextTool(canvas);
-            break;
+      const onMutation = () => scheduleCommit();
+      canvas.on('object:added', onMutation);
+      canvas.on('object:modified', onMutation);
+      canvas.on('object:removed', onMutation);
+      canvas.on('text:changed', onMutation);
 
-          case 'shape':
-            canvas.isDrawingMode = false;
-            canvas.selection = true;
-            setupShapeTool(canvas);
-            break;
+      const onSelection = () => onSelectionChangeRef.current?.(Boolean(canvas.getActiveObject()));
+      canvas.on('selection:created', onSelection);
+      canvas.on('selection:updated', onSelection);
+      canvas.on('selection:cleared', onSelection);
+
+      snapshot();
+
+      const observer = new ResizeObserver(() => {
+        const { clientWidth, clientHeight } = host;
+        if (clientWidth > 0 && clientHeight > 0) {
+          canvas.setDimensions({ width: clientWidth, height: clientHeight });
+          canvas.requestRenderAll();
         }
-      }
-    }, [tool, color, lineWidth]);
+      });
+      observer.observe(host);
 
-    // Update color and line width
+      return () => {
+        observer.disconnect();
+        if (changeTimerRef.current) clearTimeout(changeTimerRef.current);
+        canvas.dispose();
+        fabricRef.current = null;
+      };
+    }, [scheduleCommit, snapshot]);
+
+    // ---- tools -----------------------------------------------------------
+
     useEffect(() => {
-      if (fabricCanvasRef.current && (tool === 'pen' || tool === 'eraser')) {
-        const brush = fabricCanvasRef.current.freeDrawingBrush;
-        brush.color = tool === 'eraser' ? '#ffffff' : color;
-        brush.width = tool === 'eraser' ? lineWidth * 3 : lineWidth;
+      const canvas = fabricRef.current;
+      if (!canvas) return;
+
+      const interactive = tool === 'select' || tool === 'text';
+      canvas.isDrawingMode = tool === 'pen';
+      canvas.selection = tool === 'select'; // rubber-band multi-select only in select mode
+      canvas.defaultCursor = tool === 'eraser' ? 'cell' : tool === 'text' ? 'text' : tool === 'select' ? 'default' : 'crosshair';
+      canvas.hoverCursor = tool === 'eraser' ? 'cell' : tool === 'select' || tool === 'text' ? 'move' : canvas.defaultCursor;
+      canvas.forEachObject((obj) => {
+        obj.selectable = interactive;
+        obj.evented = interactive || tool === 'eraser';
+      });
+      canvas.discardActiveObject();
+      canvas.requestRenderAll();
+
+      if (tool === 'pen') {
+        const brush = canvas.freeDrawingBrush;
+        brush.color = color;
+        brush.width = lineWidth;
+        return;
       }
-    }, [color, lineWidth, tool]);
+      if (tool === 'select') return;
 
-    // Handle container size changes
-    useEffect(() => {
-      if (fabricCanvasRef.current && canvasRef.current?.parentElement) {
-        const parentElement = canvasRef.current.parentElement;
-        const newWidth = parentElement.clientWidth;
-        const newHeight = parentElement.clientHeight;
+      const disposers: Array<() => void> = [];
+      const on = <T extends Event = Event>(event: string, handler: (e: fabric.IEvent<T>) => void) => {
+        canvas.on(event, handler as (e: fabric.IEvent) => void);
+        disposers.push(() => canvas.off(event, handler as (e: fabric.IEvent) => void));
+      };
 
-        // Update canvas element dimensions
-        canvasRef.current.width = newWidth;
-        canvasRef.current.height = newHeight;
-
-        // Update Fabric.js canvas dimensions
-        fabricCanvasRef.current.setDimensions({
-          width: newWidth,
-          height: newHeight,
+      if (tool === 'eraser') {
+        let pressed = false;
+        const eraseAt = (e: fabric.IEvent<MouseEvent>) => {
+          const target = canvas.findTarget(e.e, false);
+          if (target) canvas.remove(target);
+        };
+        on<MouseEvent>('mouse:down', (e) => {
+          pressed = true;
+          eraseAt(e);
         });
-
-        // Re-render canvas
-        fabricCanvasRef.current.renderAll();
-      }
-    }, [width, height]);
-
-    const setupTextTool = useCallback((canvas: fabric.Canvas) => {
-      // Remove existing event listeners
-      canvas.off('mouse:down');
-      canvas.off('mouse:up');
-
-      canvas.on('mouse:down', (options) => {
-        if (options.target) return;
-
-        const pointer = canvas.getPointer(options.e);
-        const text = new fabric.IText('Click to edit', {
-          left: pointer.x,
-          top: pointer.y,
-          fontFamily: 'Arial',
-          fontSize: 16,
-          fill: color,
+        on<MouseEvent>('mouse:move', (e) => {
+          if (pressed) eraseAt(e);
         });
-
-        canvas.add(text);
-        canvas.setActiveObject(text);
-        text.enterEditing();
-        text.selectAll();
-      });
-    }, [color]);
-
-    const setupShapeTool = useCallback((canvas: fabric.Canvas) => {
-      // Remove existing event listeners
-      canvas.off('mouse:down');
-      canvas.off('mouse:move');
-      canvas.off('mouse:up');
-
-      let isDrawing = false;
-      let startX = 0;
-      let startY = 0;
-      let currentShape: fabric.Object | null = null;
-
-      canvas.on('mouse:down', (options) => {
-        if (options.target) return;
-
-        isDrawing = true;
-        const pointer = canvas.getPointer(options.e);
-        startX = pointer.x;
-        startY = pointer.y;
-      });
-
-      canvas.on('mouse:move', (options) => {
-        if (!isDrawing) return;
-
-        const pointer = canvas.getPointer(options.e);
-        const width = pointer.x - startX;
-        const height = pointer.y - startY;
-
-        // Remove previous shape
-        if (currentShape) {
-          canvas.remove(currentShape);
-        }
-
-        // Create rectangle
-        currentShape = new fabric.Rect({
-          left: Math.min(startX, pointer.x),
-          top: Math.min(startY, pointer.y),
-          width: Math.abs(width),
-          height: Math.abs(height),
-          fill: 'transparent',
-          stroke: color,
-          strokeWidth: lineWidth,
+        on('mouse:up', () => {
+          pressed = false;
         });
+      } else if (tool === 'text') {
+        on<MouseEvent>('mouse:down', (e) => {
+          if (e.target) return;
+          const pointer = canvas.getPointer(e.e);
+          const text = new fabric.IText('', {
+            left: pointer.x,
+            top: pointer.y,
+            fontFamily: 'Segoe UI, Roboto, sans-serif',
+            fontSize: Math.max(16, lineWidth * 8),
+            fill: color,
+          });
+          canvas.add(text);
+          canvas.setActiveObject(text);
+          text.enterEditing();
+        });
+        on('text:editing:exited', (e) => {
+          const target = e.target as fabric.IText | undefined;
+          if (target && !target.text?.trim()) canvas.remove(target);
+        });
+      } else {
+        // rect / ellipse / line: rubber-band a single object, mutate it while dragging
+        let start: { x: number; y: number } | null = null;
+        let shape: fabric.Object | null = null;
 
-        canvas.add(currentShape);
-      });
-
-      canvas.on('mouse:up', () => {
-        isDrawing = false;
-        currentShape = null;
-      });
-    }, [color, lineWidth]);
-
-    // Expose canvas methods via ref
-    useImperativeHandle(ref, () => ({
-      getCanvas: () => fabricCanvasRef.current,
-      clear: () => {
-        if (fabricCanvasRef.current) {
-          fabricCanvasRef.current.clear();
-          fabricCanvasRef.current.backgroundColor = '#ffffff';
-          saveCanvasState();
-          notifyChange();
-        }
-      },
-      undo: () => {
-        if (historyIndexRef.current > 0) {
-          historyIndexRef.current--;
-          const state = historyRef.current[historyIndexRef.current];
-          if (fabricCanvasRef.current && state) {
-            fabricCanvasRef.current.loadFromJSON(state, () => {
-              fabricCanvasRef.current?.renderAll();
-              notifyChange();
-            });
+        on<MouseEvent>('mouse:down', (e) => {
+          start = canvas.getPointer(e.e);
+          const common = { stroke: color, strokeWidth: lineWidth, fill: 'transparent', selectable: false, evented: false };
+          if (tool === 'rect') {
+            shape = new fabric.Rect({ ...common, left: start.x, top: start.y, width: 0, height: 0 });
+          } else if (tool === 'ellipse') {
+            shape = new fabric.Ellipse({ ...common, left: start.x, top: start.y, rx: 0, ry: 0 });
+          } else {
+            shape = new fabric.Line([start.x, start.y, start.x, start.y], { ...common });
           }
-        }
-      },
-      redo: () => {
-        if (historyIndexRef.current < historyRef.current.length - 1) {
-          historyIndexRef.current++;
-          const state = historyRef.current[historyIndexRef.current];
-          if (fabricCanvasRef.current && state) {
-            fabricCanvasRef.current.loadFromJSON(state, () => {
-              fabricCanvasRef.current?.renderAll();
-              notifyChange();
-            });
+          restoringRef.current = true; // do not record the in-progress shape
+          canvas.add(shape);
+          restoringRef.current = false;
+        });
+        on<MouseEvent>('mouse:move', (e) => {
+          if (!start || !shape) return;
+          const p = canvas.getPointer(e.e);
+          const left = Math.min(start.x, p.x);
+          const top = Math.min(start.y, p.y);
+          const w = Math.abs(p.x - start.x);
+          const h = Math.abs(p.y - start.y);
+          if (shape instanceof fabric.Rect) {
+            shape.set({ left, top, width: w, height: h });
+          } else if (shape instanceof fabric.Ellipse) {
+            shape.set({ left, top, rx: w / 2, ry: h / 2 });
+          } else if (shape instanceof fabric.Line) {
+            shape.set({ x2: p.x, y2: p.y });
           }
-        }
-      },
-      toDataURL: () => {
-        return fabricCanvasRef.current?.toDataURL() || '';
-      },
-      setDrawingMode: (isDrawing: boolean) => {
-        if (fabricCanvasRef.current) {
-          fabricCanvasRef.current.isDrawingMode = isDrawing;
-        }
-      },
-    }));
+          shape.setCoords();
+          canvas.requestRenderAll();
+        });
+        on('mouse:up', () => {
+          if (shape) {
+            const tiny =
+              (shape instanceof fabric.Line && shape.x1 === shape.x2 && shape.y1 === shape.y2) ||
+              (!(shape instanceof fabric.Line) && (shape.width || 0) < 2 && (shape.height || 0) < 2);
+            if (tiny) {
+              restoringRef.current = true;
+              canvas.remove(shape);
+              restoringRef.current = false;
+            } else {
+              scheduleCommit();
+            }
+          }
+          start = null;
+          shape = null;
+        });
+      }
+
+      return () => disposers.forEach((dispose) => dispose());
+    }, [tool, color, lineWidth, scheduleCommit]);
+
+    // ---- imperative API --------------------------------------------------
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        getCanvas: () => fabricRef.current,
+        isEmpty: () => !fabricRef.current || fabricRef.current.getObjects().length === 0,
+        clear: () => {
+          const canvas = fabricRef.current;
+          if (!canvas) return;
+          restoringRef.current = true;
+          canvas.clear();
+          applyBackground(canvas);
+          canvas.renderAll();
+          restoringRef.current = false;
+          snapshot();
+          emitChange(canvas);
+        },
+        deleteSelection: () => {
+          const canvas = fabricRef.current;
+          if (!canvas) return false;
+          const active = canvas.getActiveObjects();
+          if (active.length === 0) return false;
+          const editing = active.some((o) => (o as fabric.IText).isEditing);
+          if (editing) return false; // Backspace inside a text box edits text, not the object
+          restoringRef.current = true;
+          active.forEach((o) => canvas.remove(o));
+          canvas.discardActiveObject();
+          restoringRef.current = false;
+          canvas.requestRenderAll();
+          scheduleCommit();
+          return true;
+        },
+        addText: (text, options) => {
+          const canvas = fabricRef.current;
+          if (!canvas || !text.trim()) return;
+          const width = Math.max(240, canvas.getWidth() - 48);
+          const textbox = new fabric.Textbox(text, {
+            left: 24,
+            top: options?.top ?? 24,
+            width,
+            fontFamily: 'Segoe UI, Roboto, sans-serif',
+            fontSize: options?.fontSize ?? 18,
+            fill: options?.color ?? '#212121',
+            lineHeight: 1.3,
+            selectable: true,
+            evented: true,
+          });
+          canvas.add(textbox);
+          canvas.requestRenderAll();
+          scheduleCommit();
+        },
+        getReadable: () => {
+          const canvas = fabricRef.current;
+          if (!canvas) return { texts: [], objectCount: 0, kinds: {} };
+          const kinds: Record<string, number> = {};
+          const texts: string[] = [];
+          canvas.getObjects().forEach((obj) => {
+            const type = obj.type || 'object';
+            kinds[type] = (kinds[type] || 0) + 1;
+            const text = (obj as fabric.IText).text;
+            if (typeof text === 'string' && text.trim()) texts.push(text.trim());
+          });
+          return { texts, objectCount: canvas.getObjects().length, kinds };
+        },
+        undo: () => {
+          if (historyIndexRef.current <= 0) return;
+          historyIndexRef.current -= 1;
+          emitHistory();
+          void restore(historyRef.current[historyIndexRef.current]);
+        },
+        redo: () => {
+          if (historyIndexRef.current >= historyRef.current.length - 1) return;
+          historyIndexRef.current += 1;
+          emitHistory();
+          void restore(historyRef.current[historyIndexRef.current]);
+        },
+        toDataURL: (options) => {
+          const canvas = fabricRef.current;
+          if (!canvas) return '';
+          // Exports are always on white, regardless of the on-screen grid.
+          const previous = canvas.backgroundColor;
+          canvas.backgroundColor = BACKGROUND;
+          const url = canvas.toDataURL({ format: 'png', multiplier: options?.multiplier ?? 1 });
+          canvas.backgroundColor = previous;
+          canvas.requestRenderAll();
+          return url;
+        },
+        toJSON: () => (fabricRef.current ? JSON.stringify(fabricRef.current.toJSON()) : ''),
+        loadJSON: async (json) => {
+          await restore(json);
+          snapshot();
+        },
+      }),
+      [applyBackground, emitChange, emitHistory, restore, scheduleCommit, snapshot],
+    );
+
+    useEffect(() => {
+      const canvas = fabricRef.current;
+      if (!canvas) return;
+      applyBackground(canvas);
+      canvas.requestRenderAll();
+    }, [applyBackground, grid]);
 
     return (
       <Box
+        ref={hostRef}
         sx={{
-          width,
-          height,
+          width: '100%',
+          height: '100%',
           position: 'relative',
-          '& canvas': {
-            border: '1px solid #ddd',
-            borderRadius: 1,
-            cursor: tool === 'pen' || tool === 'eraser' ? 'crosshair' : 'default',
-          },
+          overflow: 'hidden',
+          backgroundColor: BACKGROUND,
+          touchAction: 'none', // stylus / finger drawing must not scroll the page
+          userSelect: 'none',
+          ...gridBackground(grid),
         }}
       >
-        <canvas
-          ref={canvasRef}
-          style={{
-            width: '100%',
-            height: '100%',
-            display: 'block',
-          }}
-        />
+        <canvas ref={canvasElRef} />
+        {isEmpty && emptyHint && (
+          <Box
+            sx={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              pointerEvents: 'none',
+              p: 4,
+              textAlign: 'center',
+            }}
+          >
+            <Typography variant="body2" sx={{ color: alpha('#000', 0.38), maxWidth: 420 }}>
+              {emptyHint}
+            </Typography>
+          </Box>
+        )}
       </Box>
     );
-  }
+  },
 );
 
 DrawingCanvas.displayName = 'DrawingCanvas';

@@ -6,7 +6,6 @@ Supports Qwen3-Omni, Microsoft VibeVoice, and MERaLiON-AudioLLM models
 import json
 import logging
 import time
-import psutil
 import platform
 from typing import Dict, List, Any, Optional, Union, Callable
 from datetime import datetime
@@ -17,17 +16,22 @@ import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import torch
 import numpy as np
-from transformers import (
-    AutoTokenizer, AutoModel, AutoModelForCausalLM,
-    AutoModelForSpeechSeq2Seq, AutoProcessor,
-    pipeline, AutoModelForTextToWaveform
-)
-import soundfile as sf
-import librosa
+
+from services.optional_deps import torch, transformers, soundfile as sf, librosa, psutil, cuda_available
+
+if transformers is not None:
+    from transformers import (
+        AutoTokenizer, AutoModel, AutoModelForCausalLM,
+        AutoModelForSpeechSeq2Seq, AutoProcessor,
+        pipeline, AutoModelForTextToWaveform
+    )
+else:  # pragma: no cover
+    AutoTokenizer = AutoModel = AutoModelForCausalLM = None
+    AutoModelForSpeechSeq2Seq = AutoProcessor = pipeline = AutoModelForTextToWaveform = None
 
 from config.settings import get_settings
+from services.common import utc_now_iso
 from services.model_config import (
     ModelRegistry, ModelConfig, ModelInstance, ModelStatus, ModelType,
     get_model_registry
@@ -114,17 +118,18 @@ class EnhancedModelService:
 
     def get_system_resources(self) -> Dict[str, Any]:
         """Get current system resource usage"""
+        memory = psutil.virtual_memory() if psutil else None
         return {
-            "cpu_percent": psutil.cpu_percent(),
-            "memory_percent": psutil.virtual_memory().percent,
-            "memory_available_gb": psutil.virtual_memory().available / (1024**3),
-            "disk_usage_percent": psutil.disk_usage('/').percent,
-            "gpu_available": torch.cuda.is_available(),
-            "gpu_memory_used": self._get_gpu_memory_used() if torch.cuda.is_available() else 0,
-            "gpu_memory_total": self._get_gpu_memory_total() if torch.cuda.is_available() else 0,
+            "cpu_percent": psutil.cpu_percent() if psutil else 0.0,
+            "memory_percent": memory.percent if memory else 0.0,
+            "memory_available_gb": memory.available / (1024**3) if memory else 0.0,
+            "disk_usage_percent": psutil.disk_usage('/').percent if psutil else 0.0,
+            "gpu_available": cuda_available(),
+            "gpu_memory_used": self._get_gpu_memory_used() if cuda_available() else 0,
+            "gpu_memory_total": self._get_gpu_memory_total() if cuda_available() else 0,
             "platform": platform.system(),
             "python_version": platform.python_version(),
-            "torch_version": torch.__version__
+            "torch_version": torch.__version__ if torch else None
         }
 
     async def load_model(
@@ -187,7 +192,7 @@ class EnhancedModelService:
                 return {
                     "model_name": model_name,
                     "status": "not_loaded",
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": utc_now_iso()
                 }
 
             instance = self.models[model_name]
@@ -209,7 +214,7 @@ class EnhancedModelService:
             gc.collect()
 
             # Clear CUDA cache
-            if torch.cuda.is_available():
+            if cuda_available():
                 torch.cuda.empty_cache()
 
             logger.info(f"Model {model_name} unloaded successfully")
@@ -218,7 +223,7 @@ class EnhancedModelService:
                 "model_name": model_name,
                 "status": "unloaded",
                 "memory_freed_mb": memory_before,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -253,7 +258,7 @@ class EnhancedModelService:
                     "languages": config.languages,
                     "special_features": config.special_features
                 },
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -329,7 +334,7 @@ class EnhancedModelService:
                 "old_model": old_model,
                 "new_model": new_model_name,
                 "status": "switched",
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -425,7 +430,7 @@ class EnhancedModelService:
                 "status": "optimized",
                 "optimizations_applied": instance.optimization_applied,
                 "memory_usage_mb": instance.memory_usage_mb,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -436,40 +441,43 @@ class EnhancedModelService:
     def _get_system_resources(self) -> Dict[str, Any]:
         """Get system resource information"""
         return {
-            "cpu_count": psutil.cpu_count(),
-            "memory_total_gb": psutil.virtual_memory().total / (1024**3),
-            "gpu_available": torch.cuda.is_available(),
-            "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+            "cpu_count": psutil.cpu_count() if psutil else os.cpu_count(),
+            "memory_total_gb": psutil.virtual_memory().total / (1024**3) if psutil else 0.0,
+            "gpu_available": cuda_available(),
+            "gpu_count": torch.cuda.device_count() if cuda_available() else 0,
             "platform": platform.system()
         }
 
     def _get_gpu_memory_used(self) -> float:
         """Get GPU memory usage in GB"""
-        if torch.cuda.is_available():
+        if cuda_available():
             return torch.cuda.memory_allocated() / (1024**3)
         return 0.0
 
     def _get_gpu_memory_total(self) -> float:
         """Get total GPU memory in GB"""
-        if torch.cuda.is_available():
+        if cuda_available():
             return torch.cuda.get_device_properties(0).total_memory / (1024**3)
         return 0.0
 
     def _check_system_resources(self, model_config: ModelConfig) -> bool:
         """Check if system has sufficient resources for the model"""
         # Check memory
+        if psutil is None:
+            logger.warning("psutil not installed; skipping memory check for %s", model_config.name)
+            return True
         available_memory_gb = psutil.virtual_memory().available / (1024**3)
         if available_memory_gb < model_config.memory_required_gb:
             logger.warning(f"Insufficient memory for {model_config.name}: need {model_config.memory_required_gb}GB, have {available_memory_gb}GB")
             return False
 
         # Check GPU requirement
-        if model_config.gpu_required and not torch.cuda.is_available():
+        if model_config.gpu_required and not cuda_available():
             logger.warning(f"GPU required for {model_config.name} but not available")
             return False
 
         # Check GPU memory if required
-        if model_config.gpu_required and torch.cuda.is_available():
+        if model_config.gpu_required and cuda_available():
             available_gpu_memory_gb = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()) / (1024**3)
             if available_gpu_memory_gb < model_config.memory_required_gb * 0.8:  # Leave some buffer
                 logger.warning(f"Insufficient GPU memory for {model_config.name}")
@@ -621,10 +629,10 @@ class EnhancedModelService:
         if requested_device:
             return requested_device
 
-        if config.gpu_required and torch.cuda.is_available():
+        if config.gpu_required and cuda_available():
             return "cuda"
 
-        if torch.cuda.is_available() and not options.get("force_cpu", False):
+        if cuda_available() and not options.get("force_cpu", False):
             return "cuda"
 
         return "cpu"
@@ -662,7 +670,7 @@ class EnhancedModelService:
                 "model_used": instance.config.name,
                 "model_type": instance.config.type.value,
                 "processing_time": time.time() - start_time,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -719,7 +727,7 @@ class EnhancedModelService:
             "device": instance.device,
             "memory_usage_mb": instance.memory_usage_mb,
             "loading_time": loading_time,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utc_now_iso()
         }
 
     async def _scan_models(self):

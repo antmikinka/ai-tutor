@@ -9,13 +9,18 @@ import time
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 import asyncio
-import torch
 import numpy as np
-from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 import sympy as sp
-from sympy.parsing.latex import parse_latex
+
+from services.optional_deps import torch, transformers, cuda_available
+
+if transformers is not None:
+    from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
+else:  # pragma: no cover - exercised only without the ML stack
+    AutoTokenizer = AutoModelForCausalLM = GenerationConfig = None
 
 from config.settings import get_settings
+from services.common import utc_now_iso
 from services.model_config import ModelConfig, ModelType
 
 logger = logging.getLogger(__name__)
@@ -137,7 +142,7 @@ class Qwen3OmniService:
                 "processing_time": processing_time,
                 "model_used": "Qwen3-Omni-30B-A3B-Thinking",
                 "tokens_used": solution_data.get("tokens_used", 0),
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -181,7 +186,7 @@ class Qwen3OmniService:
                 "explanation": explanation,
                 "type": explanation_type,
                 "processing_time": processing_time,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -222,7 +227,7 @@ class Qwen3OmniService:
                 "analysis": analysis_result,
                 "confidence": analysis_data.get("confidence", 0.0),
                 "processing_time": processing_time,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -264,7 +269,7 @@ class Qwen3OmniService:
                 "difficulty": difficulty,
                 "problems": problems[:count],
                 "processing_time": processing_time,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -346,7 +351,7 @@ Provide a clear, step-by-step solution:"""
             inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
 
             # Move to appropriate device
-            if self.settings.ai_use_gpu and torch.cuda.is_available():
+            if self.settings.ai_use_gpu and cuda_available():
                 inputs = {k: v.cuda() for k, v in inputs.items()}
                 self.model.cuda()
 
@@ -731,7 +736,7 @@ Practice Problems:"""
             logger.info("Cleaning up Qwen3-Omni Service...")
 
             # Move model to CPU and clear memory
-            if self.model and torch.cuda.is_available():
+            if self.model and cuda_available():
                 self.model.cpu()
                 torch.cuda.empty_cache()
 

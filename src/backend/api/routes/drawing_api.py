@@ -2,37 +2,44 @@
 Drawing and canvas processing API endpoints
 """
 
+from __future__ import annotations
+
+import base64
 import json
 import logging
-from typing import Dict, List, Any, Optional
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from pydantic import BaseModel
-from datetime import datetime
 import uuid
-import base64
-import io
+from typing import Any, Dict, List, Optional
 
-from services.drawing_service import DrawingService
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
+
+from api.dependencies import get_drawing_service
+from services.common import utc_now_iso
+from services.drawing_service import DrawingDecodeError, DrawingService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Pydantic models for request/response
+
 class DrawingProcessRequest(BaseModel):
-    drawing_data: str  # Base64 encoded image
+    drawing_data: str = Field(min_length=1)
     process_type: str = "equation_recognition"
-    options: Optional[Dict[str, Any]] = {}
+    options: Dict[str, Any] = Field(default_factory=dict)
+
 
 class DrawingProcessResponse(BaseModel):
     id: str
     processed_data: Dict[str, Any]
     confidence: float
     processing_time: float
+    image_dimensions: Dict[str, int]
     timestamp: str
 
+
 class StrokeAnalysisRequest(BaseModel):
-    strokes: List[Dict[str, Any]]  # List of stroke data
+    strokes: List[Dict[str, Any]] = Field(max_length=5000)
     analysis_type: str = "shape_recognition"
+
 
 class StrokeAnalysisResponse(BaseModel):
     id: str
@@ -41,9 +48,11 @@ class StrokeAnalysisResponse(BaseModel):
     confidence: float
     timestamp: str
 
+
 class CanvasStateRequest(BaseModel):
-    canvas_data: str  # Base64 encoded canvas image
-    canvas_objects: List[Dict[str, Any]] = []
+    canvas_data: str = Field(min_length=1)
+    canvas_objects: List[Dict[str, Any]] = Field(default_factory=list)
+
 
 class CanvasStateResponse(BaseModel):
     id: str
@@ -51,303 +60,137 @@ class CanvasStateResponse(BaseModel):
     suggestions: List[str]
     timestamp: str
 
-# Initialize services
-drawing_service = DrawingService()
+
+def _http_error(exc: Exception, what: str) -> HTTPException:
+    if isinstance(exc, DrawingDecodeError):
+        return HTTPException(status_code=400, detail=str(exc))
+    logger.exception("%s failed", what)
+    return HTTPException(status_code=500, detail=f"Failed to {what}: {exc}")
+
 
 @router.post("/process-drawing", response_model=DrawingProcessResponse)
-async def process_drawing(request: DrawingProcessRequest):
-    """
-    Process a drawing for mathematical content
-    """
+async def process_drawing(request: DrawingProcessRequest, drawing: DrawingService = Depends(get_drawing_service)):
     try:
-        logger.info(f"Processing drawing with type: {request.process_type}")
+        result = await drawing.process_drawing(request.drawing_data, request.process_type, request.options)
+    except Exception as exc:
+        raise _http_error(exc, "process drawing") from exc
+    return DrawingProcessResponse(
+        id=str(uuid.uuid4()),
+        processed_data=result["data"],
+        confidence=result["confidence"],
+        processing_time=result["processing_time"],
+        image_dimensions=result["image_dimensions"],
+        timestamp=result["timestamp"],
+    )
 
-        # Process the drawing
-        result = await drawing_service.process_drawing(
-            request.drawing_data,
-            request.process_type,
-            request.options
-        )
-
-        return DrawingProcessResponse(
-            id=str(uuid.uuid4()),
-            processed_data=result["data"],
-            confidence=result.get("confidence", 0.0),
-            processing_time=result.get("processing_time", 0.0),
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    except Exception as e:
-        logger.error(f"Error processing drawing: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process drawing: {str(e)}")
 
 @router.post("/analyze-strokes", response_model=StrokeAnalysisResponse)
-async def analyze_strokes(request: StrokeAnalysisRequest):
-    """
-    Analyze individual strokes for shape and equation recognition
-    """
-    try:
-        logger.info(f"Analyzing {len(request.strokes)} strokes")
+async def analyze_strokes(request: StrokeAnalysisRequest, drawing: DrawingService = Depends(get_drawing_service)):
+    result = await drawing.analyze_strokes(request.strokes, request.analysis_type)
+    return StrokeAnalysisResponse(
+        id=str(uuid.uuid4()),
+        recognized_shapes=result["shapes"],
+        equations=result["equations"],
+        confidence=result["confidence"],
+        timestamp=result["timestamp"],
+    )
 
-        # Analyze strokes
-        result = await drawing_service.analyze_strokes(
-            request.strokes,
-            request.analysis_type
-        )
-
-        return StrokeAnalysisResponse(
-            id=str(uuid.uuid4()),
-            recognized_shapes=result.get("shapes", []),
-            equations=result.get("equations", []),
-            confidence=result.get("confidence", 0.0),
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    except Exception as e:
-        logger.error(f"Error analyzing strokes: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to analyze strokes: {str(e)}")
 
 @router.post("/analyze-canvas", response_model=CanvasStateResponse)
-async def analyze_canvas_state(request: CanvasStateRequest):
-    """
-    Analyze complete canvas state for mathematical content
-    """
+async def analyze_canvas_state(request: CanvasStateRequest, drawing: DrawingService = Depends(get_drawing_service)):
     try:
-        logger.info("Analyzing canvas state")
+        result = await drawing.analyze_canvas_state(request.canvas_data, request.canvas_objects)
+    except Exception as exc:
+        raise _http_error(exc, "analyze canvas") from exc
+    return CanvasStateResponse(id=str(uuid.uuid4()), analysis=result["analysis"], suggestions=result["suggestions"], timestamp=result["timestamp"])
 
-        # Analyze canvas
-        result = await drawing_service.analyze_canvas_state(
-            request.canvas_data,
-            request.canvas_objects
-        )
-
-        return CanvasStateResponse(
-            id=str(uuid.uuid4()),
-            analysis=result["analysis"],
-            suggestions=result.get("suggestions", []),
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    except Exception as e:
-        logger.error(f"Error analyzing canvas state: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to analyze canvas state: {str(e)}")
 
 @router.post("/upload-drawing")
 async def upload_drawing(
     file: UploadFile = File(...),
     process_type: str = Form("equation_recognition"),
-    options: str = Form("{}")
+    options: str = Form("{}"),
+    drawing: DrawingService = Depends(get_drawing_service),
 ):
-    """
-    Upload and process a drawing file
-    """
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    image_data = await file.read()
+    if len(image_data) > drawing.settings.max_upload_size:
+        raise HTTPException(status_code=413, detail="Image exceeds the upload size limit")
     try:
-        logger.info(f"Processing uploaded drawing: {file.filename}")
+        process_options = json.loads(options) if options else {}
+    except json.JSONDecodeError:
+        process_options = {}
+    try:
+        result = await drawing.process_drawing(base64.b64encode(image_data).decode("ascii"), process_type, process_options)
+    except Exception as exc:
+        raise _http_error(exc, "process uploaded drawing") from exc
+    return {"filename": file.filename, "process_type": process_type, "result": result, "timestamp": utc_now_iso()}
 
-        # Validate file type
-        if not file.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail="File must be an image")
-
-        # Read file data
-        image_data = await file.read()
-
-        # Convert to base64
-        base64_image = base64.b64encode(image_data).decode('utf-8')
-
-        # Parse options
-        try:
-            process_options = json.loads(options)
-        except:
-            process_options = {}
-
-        # Process drawing
-        result = await drawing_service.process_drawing(
-            base64_image,
-            process_type,
-            process_options
-        )
-
-        return {
-            "filename": file.filename,
-            "process_type": process_type,
-            "result": result,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error processing uploaded drawing: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process uploaded drawing: {str(e)}")
 
 @router.post("/enhance-drawing")
-async def enhance_drawing_quality(request: DrawingProcessRequest):
-    """
-    Enhance drawing quality for better recognition
-    """
+async def enhance_drawing_quality(request: DrawingProcessRequest, drawing: DrawingService = Depends(get_drawing_service)):
     try:
-        logger.info("Enhancing drawing quality")
+        result = await drawing.enhance_drawing(request.drawing_data, request.options)
+    except Exception as exc:
+        raise _http_error(exc, "enhance drawing") from exc
+    return {"id": str(uuid.uuid4()), **result}
 
-        # Enhance drawing
-        result = await drawing_service.enhance_drawing(
-            request.drawing_data,
-            request.options
-        )
-
-        return {
-            "id": str(uuid.uuid4()),
-            "enhanced_data": result["enhanced_data"],
-            "enhancements_applied": result.get("enhancements", []),
-            "original_confidence": result.get("original_confidence", 0.0),
-            "enhanced_confidence": result.get("enhanced_confidence", 0.0),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error enhancing drawing: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to enhance drawing: {str(e)}")
 
 @router.post("/convert-to-latex")
-async def convert_to_latex(request: DrawingProcessRequest):
-    """
-    Convert recognized mathematical expressions to LaTeX
-    """
+async def convert_to_latex(request: DrawingProcessRequest, drawing: DrawingService = Depends(get_drawing_service)):
     try:
-        logger.info("Converting drawing to LaTeX")
+        result = await drawing.convert_to_latex(request.drawing_data, request.options)
+    except Exception as exc:
+        raise _http_error(exc, "convert to LaTeX") from exc
+    return {"id": str(uuid.uuid4()), "latex_expressions": result["latex"], **{k: v for k, v in result.items() if k != "latex"}}
 
-        # Convert to LaTeX
-        result = await drawing_service.convert_to_latex(
-            request.drawing_data,
-            request.options
-        )
-
-        return {
-            "id": str(uuid.uuid4()),
-            "latex_expressions": result.get("latex", []),
-            "confidence": result.get("confidence", 0.0),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error converting to LaTeX: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to convert to LaTeX: {str(e)}")
 
 @router.get("/drawing-tools")
-async def get_available_drawing_tools():
-    """
-    Get list of available drawing tools and their capabilities
-    """
-    try:
-        tools = await drawing_service.get_available_tools()
-        return {
-            "tools": tools,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting drawing tools: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get drawing tools: {str(e)}")
+async def get_available_drawing_tools(drawing: DrawingService = Depends(get_drawing_service)):
+    return {"tools": await drawing.get_available_tools(), "timestamp": utc_now_iso()}
+
 
 @router.get("/recognition-types")
-async def get_recognition_types():
-    """
-    Get list of supported recognition types
-    """
-    try:
-        types = await drawing_service.get_recognition_types()
-        return {
-            "recognition_types": types,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting recognition types: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get recognition types: {str(e)}")
+async def get_recognition_types(drawing: DrawingService = Depends(get_drawing_service)):
+    return {"recognition_types": await drawing.get_recognition_types(), "timestamp": utc_now_iso()}
+
 
 @router.post("/batch-process")
-async def batch_process_drawings(requests: List[DrawingProcessRequest]):
-    """
-    Process multiple drawings in batch
-    """
-    try:
-        logger.info(f"Processing batch of {len(requests)} drawings")
+async def batch_process_drawings(
+    requests: List[DrawingProcessRequest],
+    drawing: DrawingService = Depends(get_drawing_service),
+):
+    if len(requests) > 20:
+        raise HTTPException(status_code=400, detail="At most 20 drawings per batch")
+    results = []
+    for req in requests:
+        try:
+            result = await drawing.process_drawing(req.drawing_data, req.process_type, req.options)
+            results.append({"request_id": str(uuid.uuid4()), "result": result, "status": "success"})
+        except Exception as exc:
+            results.append({"request_id": str(uuid.uuid4()), "error": str(exc), "status": "failed"})
+    return {
+        "results": results,
+        "total_requests": len(requests),
+        "successful_requests": sum(1 for r in results if r["status"] == "success"),
+        "timestamp": utc_now_iso(),
+    }
 
-        results = []
-        for req in requests:
-            try:
-                result = await drawing_service.process_drawing(
-                    req.drawing_data,
-                    req.process_type,
-                    req.options
-                )
-                results.append({
-                    "request_id": str(uuid.uuid4()),
-                    "result": result,
-                    "status": "success"
-                })
-            except Exception as e:
-                logger.error(f"Error processing drawing in batch: {e}")
-                results.append({
-                    "request_id": str(uuid.uuid4()),
-                    "error": str(e),
-                    "status": "failed"
-                })
-
-        return {
-            "results": results,
-            "total_requests": len(requests),
-            "successful_requests": len([r for r in results if r["status"] == "success"]),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error in batch processing: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process batch drawings: {str(e)}")
 
 @router.post("/validate-equation")
-async def validate_equation(request: DrawingProcessRequest):
-    """
-    Validate if a drawing represents a valid mathematical equation
-    """
+async def validate_equation(request: DrawingProcessRequest, drawing: DrawingService = Depends(get_drawing_service)):
     try:
-        logger.info("Validating mathematical equation from drawing")
+        result = await drawing.validate_equation(request.drawing_data, request.options)
+    except Exception as exc:
+        raise _http_error(exc, "validate equation") from exc
+    return {"id": str(uuid.uuid4()), **result}
 
-        # Validate equation
-        result = await drawing_service.validate_equation(
-            request.drawing_data,
-            request.options
-        )
-
-        return {
-            "id": str(uuid.uuid4()),
-            "is_valid": result.get("is_valid", False),
-            "equation": result.get("equation", ""),
-            "validation_errors": result.get("errors", []),
-            "suggestions": result.get("suggestions", []),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error validating equation: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to validate equation: {str(e)}")
 
 @router.post("/export-drawing")
-async def export_drawing(request: DrawingProcessRequest):
-    """
-    Export drawing in different formats
-    """
+async def export_drawing(request: DrawingProcessRequest, drawing: DrawingService = Depends(get_drawing_service)):
     try:
-        logger.info("Exporting drawing")
-
-        # Export drawing
-        result = await drawing_service.export_drawing(
-            request.drawing_data,
-            request.options
-        )
-
-        return {
-            "id": str(uuid.uuid4()),
-            "export_formats": result.get("formats", []),
-            "export_data": result.get("export_data", {}),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error exporting drawing: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to export drawing: {str(e)}")
+        result = await drawing.export_drawing(request.drawing_data, request.options)
+    except Exception as exc:
+        raise _http_error(exc, "export drawing") from exc
+    return {"id": str(uuid.uuid4()), "export_formats": result["formats"], "export_data": result["export_data"], "timestamp": result["timestamp"]}

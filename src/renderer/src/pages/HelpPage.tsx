@@ -1,313 +1,254 @@
 import React from 'react';
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
+  Alert,
   Box,
-  Typography,
-  Grid,
   Card,
   CardContent,
   CardHeader,
+  Chip,
+  Grid,
   List,
   ListItem,
   ListItemText,
-  Accordion,
-  AccordionSummary,
-  AccordionDetails,
-  Chip,
-  Alert,
+  Typography,
 } from '@mui/material';
-import {
-  School,
-  Mic,
-  CameraAlt,
-  Edit,
-  QuestionAnswer,
-  Book,
-  GitHub,
-  ContactSupport,
-} from '@mui/icons-material';
-import { styled } from '@mui/material/styles';
+import { Book, Edit, Functions, Mic, QuestionAnswer, School, Psychology } from '@mui/icons-material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import { styled } from '@mui/material/styles';
 
-const HelpContainer = styled(Box)(({ theme }) => ({
+const Container = styled(Box)(({ theme }) => ({
   padding: theme.spacing(3),
   maxWidth: 1000,
   margin: '0 auto',
 }));
 
-const FeatureCard = styled(Card)(({ theme }) => ({
-  height: '100%',
-  display: 'flex',
-  flexDirection: 'column',
+const Code = styled('code')(({ theme }) => ({
+  fontFamily: '"Cascadia Code", "Fira Code", Consolas, monospace',
+  fontSize: '0.9em',
+  padding: '0 4px',
+  borderRadius: 4,
+  backgroundColor: theme.palette.action.hover,
 }));
 
-export const HelpPage: React.FC = () => {
-  const features = [
-    {
-      icon: <Edit />,
-      title: 'Drawing Canvas',
-      description: 'Draw mathematical equations, graphs, and diagrams using the interactive canvas.',
-      features: ['Multiple drawing tools', 'Shape recognition', 'Export as image'],
-    },
-    {
-      icon: <Mic />,
-      title: 'Voice Input',
-      description: 'Speak your math problems naturally using advanced speech recognition.',
-      features: ['Natural language processing', 'Multi-language support', 'Real-time transcription'],
-    },
-    {
-      icon: <CameraAlt />,
-      title: 'Image Recognition',
-      description: 'Upload or capture images of handwritten or printed math problems.',
-      features: ['OCR technology', 'Handwriting recognition', 'Multiple formats supported'],
-    },
-    {
-      icon: <QuestionAnswer />,
-      title: 'AI Assistant',
-      description: 'Get step-by-step explanations and solutions powered by advanced AI.',
-      features: ['Qwen3-Omni-30B-A3B-Thinking model', 'Confidence scoring', 'Detailed explanations'],
-    },
-  ];
+const EXAMPLES = [
+  ['Equations', 'solve x^2 - 5x + 6 = 0', '2y - 4 = 10'],
+  ['Systems', '2x + 3 = 7 and x - y = 1'],
+  ['Inequalities', 'x^2 > 4'],
+  ['Derivatives', 'derivative of x^3 + sin(x)', 'd/dx x^3'],
+  ['Integrals', 'integrate sin(x) dx', 'integrate x^2 from 0 to 3'],
+  ['Limits', 'limit of sin(x)/x as x->0'],
+  ['Algebra', 'simplify (x^2-1)/(x-1)', 'factor x^2 - 5x + 6', 'expand (x+1)^3'],
+  ['Arithmetic', 'sqrt(16) + 2^3', '1/3 + 1/6'],
+];
 
-  const faqs = [
-    {
-      question: 'How do I start solving a math problem?',
-      answer: 'You can start by typing your problem in the chat interface, drawing on the canvas, speaking your question, or uploading an image of the problem.',
-    },
-    {
-      question: 'What types of math problems can it solve?',
-      answer: 'The AI can handle arithmetic, algebra, calculus, geometry, trigonometry, statistics, and more advanced mathematical concepts.',
-    },
-    {
-      question: 'How accurate are the solutions?',
-      answer: 'The AI provides confidence scores for each solution. Most problems have high accuracy (80%+), but complex problems may vary.',
-    },
-    {
-      question: 'Can I save my work?',
-      answer: 'Yes! You can export solutions as PDF, PNG images, or text files using the export options in the chat interface.',
-    },
-    {
-      question: 'Is my data private?',
-      answer: 'All processing happens locally on your Windows machine. No data is sent to external servers, ensuring complete privacy.',
-    },
-    {
-      question: 'How do I adjust the difficulty level?',
-      answer: 'You can adjust the AI\'s creativity and response length in the Settings page under AI Model Settings.',
-    },
-  ];
+const FEATURES = [
+  {
+    icon: <Functions />,
+    title: 'Symbolic engine',
+    description: 'Every problem is first handled by an exact, offline computer-algebra engine (SymPy). Answers are deterministic and come with the steps used.',
+    tags: ['Always available', 'Exact results', 'LaTeX output'],
+  },
+  {
+    icon: <Edit />,
+    title: 'Whiteboard',
+    description: 'Sketch working, diagrams or equations with pen, shapes and text; select, move and delete objects; optional dot or square grid. Undo/redo, export as PNG or PDF.',
+    tags: ['Vector canvas', 'Tool hotkeys', 'Grid', 'Export'],
+  },
+  {
+    icon: <School />,
+    title: 'Practice (learn by doing)',
+    description:
+      'Upload lecture notes or a textbook chapter and the tutor writes word problems from that material. Every problem is saved in History. Work on whiteboard pins the word problem and the equation in two decks at the top — the canvas below is only for working, and typed math is read live.',
+    tags: ['Saved history', 'Two-deck whiteboard', 'Engine-verified problems'],
+  },
+  {
+    icon: <QuestionAnswer />,
+    title: 'Language model (optional)',
+    description:
+      'Pick the source in Settings → Language model (or the AI-source toggle in Quick settings): the local Qwen3-Omni model, OpenRouter, OpenAI, Ollama, LM Studio or any OpenAI-compatible endpoint, or Auto (local when loaded, otherwise the API). It solves free-form word problems and writes richer practice problems; every model answer is cross-checked by the symbolic engine.',
+    tags: ['Local / OpenRouter / API', 'Auto fallback', 'Engine cross-check'],
+  },
+  {
+    icon: <Psychology />,
+    title: 'Learning style (VARK)',
+    description:
+      'Enter your VARK questionnaire scores under Settings → Learning style. Visual learners get a "Sketch it" idea with every problem; read/write learners get precise, fully worded hints; kinesthetic learners get a try-a-number first hint and the whiteboard up front; aural learners get "Read aloud". The maths and the answer checking are the same for everyone.',
+    tags: ['Visual', 'Aural', 'Read/write', 'Kinesthetic'],
+  },
+  {
+    icon: <Mic />,
+    title: 'Speech (optional)',
+    description: 'With the MERaLiON speech model loaded you can dictate problems; with VibeVoice loaded answers can be read aloud.',
+    tags: ['Requires speech models', 'Local only'],
+  },
+];
 
-  const shortcuts = [
-    { key: 'Ctrl + Enter', description: 'Send message' },
-    { key: 'Ctrl + Z', description: 'Undo on canvas' },
-    { key: 'Ctrl + Y', description: 'Redo on canvas' },
-    { key: 'F1', description: 'Open help' },
-    { key: 'Ctrl + S', description: 'Export solution' },
-    { key: 'Ctrl + M', description: 'Toggle microphone' },
-  ];
+const FAQ = [
+  {
+    q: 'Why does it say "I couldn\'t interpret that as a math problem"?',
+    a: 'The built-in engine understands mathematical expressions and a small set of instructions (solve, derivative, integrate, limit, simplify, factor, expand). Free-form word problems need a language model: load Qwen3-Omni from Settings, or connect OpenRouter / another API provider under Settings → Language model. The Quick settings toggle switches between Local, API and Auto at any time.',
+  },
+  {
+    q: 'How does Practice use my course material?',
+    a: 'Uploaded files are split into passages and embedded into a local Chroma index (all-MiniLM-L6-v2 when it can be downloaded, otherwise an offline hashing embedder). When you ask for a problem, the most relevant passages are retrieved and handed to the problem writer. If a language model is available it writes a fresh word problem plus its equation, which the symbolic engine must be able to solve before you see it; otherwise a verified template that matches the topic is used.',
+  },
+  {
+    q: 'Do I have to type the answer in a particular form?',
+    a: 'No. Enter a number, a fraction, an expression, or "x = 12". Equivalent forms count. If your value solves the equation but does not fit the situation (for example a negative length), you will be told exactly that.',
+  },
+  {
+    q: 'Why is the microphone or drawing recognition disabled?',
+    a: 'Those features depend on optional local models. The toolbar buttons enable themselves automatically once the backend reports the corresponding model as loaded. Nothing is sent to the cloud.',
+  },
+  {
+    q: 'How do I check my own answer?',
+    a: 'After the tutor solves a problem, press "Check my own answer" under the input, type your answer (for example x = 2 or x = 3) and send. The engine compares it symbolically, so equivalent forms count as correct.',
+  },
+  {
+    q: 'Where does my API key go, and what is sent to the provider?',
+    a: 'The key is saved on this computer only (in the backend data folder, readable by your user account) and is sent solely to the provider base URL you configured. When the API answers a question, the problem text is sent; for practice generation, the retrieved passages from your course material are included so the problem matches what you are studying. In "Local" mode nothing leaves your machine.',
+  },
+  {
+    q: 'Where does a practice problem go when I press Work on whiteboard?',
+    a: 'It does not get pasted onto the drawing. The whiteboard is split: the top-left deck holds the word problem, the top-right deck holds the equation (hidden until you ask) and a live reading of whatever you type on the board, and the canvas underneath is only for working. The problem is also saved in Practice → History, so you can reopen it later — including the drawing, if you made one.',
+  },
+  {
+    q: 'What does my learning style actually change?',
+    a: 'Only presentation. Practice problems carry a "Sketch it" suggestion (what to draw on the whiteboard to see the structure), the problem writer is told which kinds of hints to write first, the worked solution repeats the sketch, and problems can be read aloud with the browser voice. A multimodal profile such as V15 A9 R15 K12 is treated as preferring Visual, Read/write and Kinesthetic (the VARK stepping-distance rule), so you get sketches, precise hints and the hands-on hint, but not read-aloud unless you turn it on yourself.',
+  },
+  {
+    q: 'What does the confidence badge mean?',
+    a: 'Results from the symbolic engine are exact and show high confidence. Results from a language model carry the confidence the model reported. Zero confidence means no engine could answer.',
+  },
+  {
+    q: 'Where is my data?',
+    a: 'Everything runs on this machine: the backend listens on localhost only, and solution history lives in memory for the current session.',
+  },
+];
 
-  return (
-    <HelpContainer>
-      <Typography variant="h4" component="h1" gutterBottom>
-        Help & Documentation
-      </Typography>
+const SHORTCUTS = [
+  ['Enter', 'Send the problem (Shift+Enter for a new line)'],
+  ['P / E / V / T', 'Pen · Eraser · Select · Text'],
+  ['L / R / O', 'Line · Rectangle · Ellipse'],
+  ['Del / Backspace', 'Delete the selected objects'],
+  ['Esc', 'Deselect'],
+  ['Ctrl + Z', 'Undo on the whiteboard'],
+  ['Ctrl + Y', 'Redo on the whiteboard'],
+  ['Ctrl + S', 'Export the transcript as text'],
+  ['Ctrl + M', 'Start / stop the microphone (when speech is available)'],
+];
 
-      <Alert severity="info" sx={{ mb: 3 }}>
-        Welcome to AI Math Tutor! This guide will help you get started and make the most of all features.
-      </Alert>
+export const HelpPage: React.FC = () => (
+  <Container>
+    <Typography variant="h4" component="h1" gutterBottom>
+      Help
+    </Typography>
 
-      {/* Getting Started */}
-      <Card sx={{ mb: 3 }}>
-        <CardHeader
-          avatar={<School />}
-          title="Getting Started"
-          subheader="Quick start guide to using AI Math Tutor"
-        />
-        <CardContent>
-          <Typography variant="body1" paragraph>
-            AI Math Tutor is your personal mathematical learning assistant. Here\'s how to get started:
-          </Typography>
-          <List>
-            <ListItem>
-              <ListItemText primary="1. Type your math problem in the chat area or draw it on the canvas" />
-            </ListItem>
-            <ListItem>
-              <ListItemText primary="2. Use voice input by clicking the microphone icon" />
-            </ListItem>
-            <ListItem>
-              <ListItemText primary="3. Upload images of math problems for automatic recognition" />
-            </ListItem>
-            <ListItem>
-              <ListItemText primary="4. Review the step-by-step solution provided by the AI" />
-            </ListItem>
-            <ListItem>
-              <ListItemText primary="5. Export your work or ask follow-up questions" />
-            </ListItem>
-          </List>
-        </CardContent>
-      </Card>
+    <Alert severity="info" sx={{ mb: 3 }}>
+      Type a problem in the Tutor panel and press Enter. The symbolic engine answers instantly and works fully offline.
+    </Alert>
 
-      {/* Features */}
-      <Typography variant="h5" component="h2" gutterBottom sx={{ mt: 4 }}>
-        Key Features
-      </Typography>
-      <Grid container spacing={3} sx={{ mb: 3 }}>
-        {features.map((feature, index) => (
-          <Grid item xs={12} md={6} lg={3} key={index}>
-            <FeatureCard>
-              <CardHeader avatar={feature.icon} title={feature.title} />
-              <CardContent>
-                <Typography variant="body2" paragraph>
-                  {feature.description}
+    <Card sx={{ mb: 3 }}>
+      <CardHeader avatar={<School />} title="What you can ask" subheader="Examples the built-in engine understands" />
+      <CardContent>
+        <Grid container spacing={1}>
+          {EXAMPLES.map(([category, ...examples]) => (
+            <Grid item xs={12} sm={6} key={category}>
+              <Typography variant="subtitle2">{category}</Typography>
+              {examples.map((example) => (
+                <Typography key={example} variant="body2">
+                  <Code>{example}</Code>
                 </Typography>
-                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-                  {feature.features.map((feat, i) => (
-                    <Chip key={i} label={feat} size="small" variant="outlined" />
-                  ))}
-                </Box>
-              </CardContent>
-            </FeatureCard>
-          </Grid>
-        ))}
-      </Grid>
-
-      {/* FAQ */}
-      <Typography variant="h5" component="h2" gutterBottom sx={{ mt: 4 }}>
-        Frequently Asked Questions
-      </Typography>
-      {faqs.map((faq, index) => (
-        <Accordion key={index} sx={{ mb: 1 }}>
-          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-            <Typography variant="h6">{faq.question}</Typography>
-          </AccordionSummary>
-          <AccordionDetails>
-            <Typography variant="body1">{faq.answer}</Typography>
-          </AccordionDetails>
-        </Accordion>
-      ))}
-
-      {/* Keyboard Shortcuts */}
-      <Typography variant="h5" component="h2" gutterBottom sx={{ mt: 4 }}>
-        Keyboard Shortcuts
-      </Typography>
-      <Card sx={{ mb: 3 }}>
-        <CardContent>
-          <Grid container spacing={2}>
-            {shortcuts.map((shortcut, index) => (
-              <Grid item xs={12} sm={6} md={4} key={index}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                  <Chip label={shortcut.key} variant="outlined" color="primary" />
-                  <Typography variant="body2">{shortcut.description}</Typography>
-                </Box>
-              </Grid>
-            ))}
-          </Grid>
-        </CardContent>
-      </Card>
-
-      {/* Technical Information */}
-      <Typography variant="h5" component="h2" gutterBottom sx={{ mt: 4 }}>
-        Technical Information
-      </Typography>
-      <Card>
-        <CardHeader
-          avatar={<Book />}
-          title="System Requirements & Technology Stack"
-        />
-        <CardContent>
-          <Grid container spacing={3}>
-            <Grid item xs={12} md={6}>
-              <Typography variant="h6" gutterBottom>
-                Minimum Requirements
-              </Typography>
-              <List dense>
-                <ListItem>
-                  <ListItemText primary="Windows 10 or later" />
-                </ListItem>
-                <ListItem>
-                  <ListItemText primary="8GB RAM (16GB recommended)" />
-                </ListItem>
-                <ListItem>
-                  <ListItemText primary="2GB free disk space" />
-                </ListItem>
-                <ListItem>
-                  <ListItemText primary="DirectX 11 compatible graphics" />
-                </ListItem>
-                <ListItem>
-                  <ListItemText primary="Microphone for voice input" />
-                </ListItem>
-              </List>
+              ))}
             </Grid>
-
-            <Grid item xs={12} md={6}>
-              <Typography variant="h6" gutterBottom>
-                Technology Stack
-              </Typography>
-              <List dense>
-                <ListItem>
-                  <ListItemText primary="Electron for cross-platform desktop app" />
-                </ListItem>
-                <ListItem>
-                  <ListItemText primary="React & Material-UI for user interface" />
-                </ListItem>
-                <ListItem>
-                  <ListItemText primary="FastAPI backend with WebSocket support" />
-                </ListItem>
-                <ListItem>
-                  <ListItemText primary="Qwen3-Omni-30B-A3B-Thinking AI model" />
-                </ListItem>
-                <ListItem>
-                  <ListItemText primary="OpenAI Whisper for speech recognition" />
-                </ListItem>
-                <ListItem>
-                  <ListItemText primary="Coqui XTTS-v2 for text-to-speech" />
-                </ListItem>
-              </List>
-            </Grid>
-          </Grid>
-        </CardContent>
-      </Card>
-
-      {/* Support */}
-      <Typography variant="h5" component="h2" gutterBottom sx={{ mt: 4 }}>
-        Support & Resources
-      </Typography>
-      <Grid container spacing={3}>
-        <Grid item xs={12} md={6}>
-          <Card>
-            <CardHeader
-              avatar={<ContactSupport />}
-              title="Get Help"
-            />
-            <CardContent>
-              <List>
-                <ListItem>
-                  <ListItemText primary="Email: support@aimathtutor.com" />
-                </ListItem>
-                <ListItem>
-                  <ListItemText primary="Documentation: docs.aimathtutor.com" />
-                </ListItem>
-                <ListItem>
-                  <ListItemText primary="Community: community.aimathtutor.com" />
-                </ListItem>
-              </List>
-            </CardContent>
-          </Card>
+          ))}
         </Grid>
+        <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 2 }}>
+          Use <Code>^</Code> for powers, <Code>*</Code> for multiplication (or write <Code>2x</Code>), <Code>sqrt()</Code>, <Code>pi</Code>,{' '}
+          <Code>E</Code>, <Code>oo</Code> for infinity. Unicode symbols such as √, π, ², ≤ are accepted too.
+        </Typography>
+      </CardContent>
+    </Card>
 
-        <Grid item xs={12} md={6}>
-          <Card>
-            <CardHeader
-              avatar={<GitHub />}
-              title="Contribute"
-            />
+    <Typography variant="h5" component="h2" gutterBottom>
+      Features
+    </Typography>
+    <Grid container spacing={2} sx={{ mb: 3 }}>
+      {FEATURES.map((feature) => (
+        <Grid item xs={12} md={6} key={feature.title}>
+          <Card sx={{ height: '100%' }}>
+            <CardHeader avatar={feature.icon} title={feature.title} />
             <CardContent>
               <Typography variant="body2" paragraph>
-                AI Math Tutor is open source! Contribute to the project on GitHub.
+                {feature.description}
               </Typography>
-              <Chip label="github.com/aimathtutor" variant="outlined" />
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                {feature.tags.map((tag) => (
+                  <Chip key={tag} label={tag} size="small" variant="outlined" />
+                ))}
+              </Box>
             </CardContent>
           </Card>
         </Grid>
-      </Grid>
-    </HelpContainer>
-  );
-};
+      ))}
+    </Grid>
+
+    <Typography variant="h5" component="h2" gutterBottom>
+      Keyboard shortcuts
+    </Typography>
+    <Card sx={{ mb: 3 }}>
+      <CardContent>
+        <Grid container spacing={1.5}>
+          {SHORTCUTS.map(([key, description]) => (
+            <Grid item xs={12} sm={6} key={key}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                <Chip label={key} variant="outlined" color="primary" size="small" />
+                <Typography variant="body2">{description}</Typography>
+              </Box>
+            </Grid>
+          ))}
+        </Grid>
+      </CardContent>
+    </Card>
+
+    <Typography variant="h5" component="h2" gutterBottom>
+      Frequently asked questions
+    </Typography>
+    {FAQ.map((item) => (
+      <Accordion key={item.q} sx={{ mb: 1 }}>
+        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+          <Typography variant="subtitle1">{item.q}</Typography>
+        </AccordionSummary>
+        <AccordionDetails>
+          <Typography variant="body2">{item.a}</Typography>
+        </AccordionDetails>
+      </Accordion>
+    ))}
+
+    <Typography variant="h5" component="h2" gutterBottom sx={{ mt: 4 }}>
+      Under the hood
+    </Typography>
+    <Card>
+      <CardHeader avatar={<Book />} title="Technology" />
+      <CardContent>
+        <List dense>
+          <ListItem>
+            <ListItemText primary="Electron desktop shell with a React + Material UI renderer" />
+          </ListItem>
+          <ListItem>
+            <ListItemText primary="Python FastAPI backend on localhost with a WebSocket for live requests" />
+          </ListItem>
+          <ListItem>
+            <ListItemText primary="SymPy computer-algebra engine for exact, deterministic solving" />
+          </ListItem>
+          <ListItem>
+            <ListItemText primary="Optional local models: Qwen3-Omni (reasoning and vision), MERaLiON (speech-to-text), VibeVoice (text-to-speech), with Whisper and XTTS as fallbacks" />
+          </ListItem>
+        </List>
+      </CardContent>
+    </Card>
+  </Container>
+);

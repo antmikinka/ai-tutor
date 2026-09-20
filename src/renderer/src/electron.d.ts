@@ -1,28 +1,41 @@
+/**
+ * Renderer-side view of the API exposed by src/main/preload.js via
+ * contextBridge. Keep in sync with that file.
+ */
+
+export interface ElectronSettings {
+  backendUrl?: string;
+  windowBounds?: { width: number; height: number; x?: number; y?: number };
+  [key: string]: unknown;
+}
+
+export interface ElectronSystemInfo {
+  platform: string;
+  arch: string;
+  version: string;
+  electronVersion: string;
+  nodeVersion: string;
+  chromeVersion: string;
+  isPackaged: boolean;
+  memory: { total: number; free: number };
+  cpu: { model: string; cores: number };
+}
+
+export type BackendEvent = 'backend-status' | 'backend-log';
+
 export interface ElectronAPI {
-  // Settings management
-  getSettings: () => Promise<any>;
-  updateSettings: (settings: any) => Promise<boolean>;
+  getSettings: () => Promise<ElectronSettings>;
+  updateSettings: (settings: Record<string, unknown>) => Promise<boolean>;
 
-  // File operations
-  openFile: () => Promise<any>;
-  saveFile: () => Promise<any>;
+  openFile: () => Promise<{ canceled: boolean; filePaths: string[] }>;
+  saveFile: (options: { defaultPath?: string; data: string; encoding?: 'utf8' | 'base64' }) => Promise<{ canceled: boolean; filePath?: string }>;
 
-  // System information
-  getSystemInfo: () => Promise<any>;
-
-  // Backend management
+  getSystemInfo: () => Promise<ElectronSystemInfo>;
+  getAppVersion: () => Promise<string>;
+  getBackendUrl: () => Promise<string>;
   restartBackend: () => Promise<boolean>;
 
-  // Communication channels
-  on: (channel: string, func: Function) => void;
-  removeAllListeners: (channel: string) => void;
-
-  // Path utilities
-  getAppPath: () => string;
-
-  // Version information
-  getVersion: () => string;
-  getAppVersion: () => string;
+  on: (channel: BackendEvent, listener: (payload: unknown) => void) => () => void;
 }
 
 export interface WindowControls {

@@ -10,13 +10,17 @@ import io
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 import asyncio
-import torch
 import numpy as np
-import soundfile as sf
-from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
-import librosa
+
+from services.optional_deps import torch, transformers, soundfile as sf, librosa, cuda_available
+
+if transformers is not None:
+    from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
+else:  # pragma: no cover
+    AutoProcessor = AutoModelForSpeechSeq2Seq = None
 
 from config.settings import get_settings
+from services.common import utc_now_iso
 from services.model_config import ModelConfig, ModelType
 
 logger = logging.getLogger(__name__)
@@ -66,7 +70,7 @@ class MERaLiONService:
             self.model.eval()
 
             # Move to appropriate device
-            if self.settings.ai_use_gpu and torch.cuda.is_available():
+            if self.settings.ai_use_gpu and cuda_available():
                 self.model.cuda()
                 logger.info("MERaLiON model moved to GPU")
             else:
@@ -152,7 +156,7 @@ class MERaLiONService:
                 "sample_rate": sample_rate,
                 "educational_mode": enable_educational_mode,
                 "noise_reduction": noise_reduction,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             })
 
             return result
@@ -260,7 +264,7 @@ class MERaLiONService:
                 "parameters": parameters,
                 "context": command_context,
                 "processing_time": processing_time,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -298,7 +302,7 @@ class MERaLiONService:
                 "recommendations": recommendations,
                 "estimated_accuracy": estimated_accuracy,
                 "overall_score": quality_metrics.get("overall_score", 0.5),
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -350,7 +354,7 @@ class MERaLiONService:
             optimization_config = {
                 "environment_type": environment_type,
                 "settings": {},
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
             if environment_type == "classroom":
@@ -598,7 +602,7 @@ class MERaLiONService:
             )
 
             # Move to appropriate device
-            if self.settings.ai_use_gpu and torch.cuda.is_available():
+            if self.settings.ai_use_gpu and cuda_available():
                 inputs = {k: v.cuda() for k, v in inputs.items()}
 
             # Generate transcription
@@ -971,7 +975,7 @@ class MERaLiONService:
             logger.info("Cleaning up MERaLiON Service...")
 
             # Move model to CPU and clear memory
-            if self.model and torch.cuda.is_available():
+            if self.model and cuda_available():
                 self.model.cpu()
                 torch.cuda.empty_cache()
 

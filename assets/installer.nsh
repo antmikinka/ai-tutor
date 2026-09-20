@@ -1,71 +1,33 @@
-; Custom NSIS script for AI Math Tutor installer
+; Custom NSIS hooks for the electron-builder installer.
+;
+; electron-builder includes this file into its own script and calls the
+; ``customInstall`` / ``customUnInstall`` macros. Only those macros belong
+; here: Sections, ``Function`` definitions and a second ``Section "Uninstall"``
+; would collide with the generated script.
+;
+; The Python backend is shipped as source under $INSTDIR\resources\backend and
+; needs a Python 3.10+ interpreter at run time (see README). We do not try to
+; pip-install anything at install time: Program Files is read-only for users
+; and there is no bundled interpreter to run pip with.
 
-!macro preInit
-    SetRegView 64
-    WriteRegExpandStr HKLM "${INSTALL_REGISTRY_KEY}" InstallLocation "$INSTDIR"
-    WriteRegExpandStr HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation "$INSTDIR"
-    SetRegView 32
-    WriteRegExpandStr HKLM "${INSTALL_REGISTRY_KEY}" InstallLocation "$INSTDIR"
-    WriteRegExpandStr HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation "$INSTDIR"
-    WriteRegExpandStr HKLM "${INSTALL_REGISTRY_KEY}" UninstallString "$INSTDIR\uninstall.exe"
-    WriteRegExpandStr HKCU "${INSTALL_REGISTRY_KEY}" UninstallString "$INSTDIR\uninstall.exe"
+!macro customInstall
+  ; Where the app keeps models/logs/data (matches app.getPath('userData')).
+  CreateDirectory "$APPDATA\${PRODUCT_FILENAME}\models"
+  CreateDirectory "$APPDATA\${PRODUCT_FILENAME}\logs"
+  CreateDirectory "$APPDATA\${PRODUCT_FILENAME}\data"
+
+  ; Tell the user up-front if Python is missing instead of failing silently at launch.
+  nsExec::ExecToStack 'python --version'
+  Pop $0
+  ${If} $0 != 0
+    MessageBox MB_ICONINFORMATION|MB_OK "AI Math Tutor needs Python 3.10 or newer on PATH to run its local backend.$\r$\n$\r$\nInstall it from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), then run:$\r$\n  pip install -r $\"$INSTDIR\resources\backend\requirements.txt$\""
+  ${EndIf}
 !macroend
 
-Section "Application Start Menu Shortcut"
-    CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-    CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE_FILENAME}"
-    CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall ${PRODUCT_NAME}.lnk" "$INSTDIR\uninstall.exe"
-SectionEnd
-
-Section "Desktop Shortcut"
-    CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE_FILENAME}"
-SectionEnd
-
-Section "Add to Path"
-    Push "$INSTDIR\backend"
-    Call AddToPath
-SectionEnd
-
-Section "Install Python Dependencies"
-    ; This section would install Python dependencies
-    ; In production, you might bundle Python with the installer
-    ExecWait '"$INSTDIR\backend\python.exe" -m pip install -r "$INSTDIR\backend\requirements.txt"'
-SectionEnd
-
-Section "Configure Model Cache"
-    ; Create model cache directory
-    CreateDirectory "$APPDATA\AI Math Tutor\models\cache"
-    WriteRegExpandStr HKCU "${INSTALL_REGISTRY_KEY}" ModelCacheDir "$APPDATA\AI Math Tutor\models\cache"
-SectionEnd
-
-Section "Register File Associations"
-    ; Register file associations for mathematical files
-    WriteRegExpandStr HKCR ".math" "" "AI.MathTutor.File"
-    WriteRegExpandStr HKCR "AI.MathTutor.File" "" "Mathematical Problem File"
-    WriteRegExpandStr HKCR "AI.MathTutor.File\DefaultIcon" "" "$INSTDIR\${PRODUCT_EXECUTABLE_FILENAME},0"
-    WriteRegExpandStr HKCR "AI.MathTutor.File\shell\open\command" "" '"$INSTDIR\${PRODUCT_EXECUTABLE_FILENAME}" "%1"'
-SectionEnd
-
-Section "Uninstall"
-    ; Remove registry keys
-    DeleteRegKey HKLM "${INSTALL_REGISTRY_KEY}"
-    DeleteRegKey HKCU "${INSTALL_REGISTRY_KEY}"
-    DeleteRegKey HKCR ".math"
-    DeleteRegKey HKCR "AI.MathTutor.File"
-
-    ; Remove shortcuts
-    Delete "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk"
-    Delete "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall ${PRODUCT_NAME}.lnk"
-    RMDir "$SMPROGRAMS\${PRODUCT_NAME}"
-    Delete "$DESKTOP\${PRODUCT_NAME}.lnk"
-
-    ; Remove application files
-    RMDir /r "$INSTDIR"
-
-    ; Remove app data
-    RMDir /r "$APPDATA\AI Math Tutor"
-
-    ; Remove from PATH
-    Push "$INSTDIR\backend"
-    Call un.RemoveFromPath
-SectionEnd
+!macro customUnInstall
+  ; Program files are removed by the generated uninstaller. Downloaded models
+  ; can be tens of gigabytes, so ask before deleting user data.
+  MessageBox MB_YESNO|MB_ICONQUESTION "Also delete downloaded AI models, logs and settings in$\r$\n$APPDATA\${PRODUCT_FILENAME}?" IDNO skipUserData
+    RMDir /r "$APPDATA\${PRODUCT_FILENAME}"
+  skipUserData:
+!macroend

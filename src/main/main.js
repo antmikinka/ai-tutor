@@ -1,280 +1,388 @@
-const { app, BrowserWindow, ipcMain, dialog, globalShortcut, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen, session, shell } = require('electron');
 const path = require('path');
-const isDev = true; // Force development mode for debugging
-const { spawn, exec } = require('child_process');
+const fs = require('fs');
+const http = require('http');
+const os = require('os');
+const { spawn } = require('child_process');
 const log = require('electron-log');
 const Store = require('electron-store');
-const WebSocket = require('ws');
 
-// Configure logging
 log.transports.file.level = 'info';
-log.info('AI Math Tutor starting...');
+log.info(`AI Math Tutor ${app.getVersion()} starting (packaged=${app.isPackaged})`);
 
-// Initialize electron store for settings
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+const isDev = !app.isPackaged;
+const DEV_SERVER_URL = process.env.ELECTRON_START_URL || 'http://localhost:3000';
+const BACKEND_HOST = '127.0.0.1';
+const BACKEND_PORT = Number(process.env.MATH_TUTOR_BACKEND_PORT) || 8000;
+const BACKEND_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
+const BACKEND_START_TIMEOUT_MS = 60_000;
+
 const store = new Store({
   defaults: {
-    windowBounds: { width: 1200, height: 800 },
-    backendUrl: 'http://localhost:8000',
-    websocketUrl: 'ws://localhost:8000',
-    audioSettings: {
-      inputDevice: 'default',
-      outputDevice: 'default',
-      volume: 0.8
-    },
-    modelSettings: {
-      temperature: 0.7,
-      maxTokens: 2048,
-      useGPU: true
-    }
-  }
+    windowBounds: { width: 1280, height: 840 },
+    userSettings: {},
+  },
 });
 
-let mainWindow;
+/** @type {BrowserWindow | null} */
+let mainWindow = null;
+/** @type {import('child_process').ChildProcess | null} */
 let backendProcess = null;
+let backendOwnedByUs = false;
+let quitting = false;
 
-/**
- * Create the main application window
- */
+// ---------------------------------------------------------------------------
+// Backend process management
+// ---------------------------------------------------------------------------
+
+function backendDir() {
+  return app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.join(__dirname, '..', 'backend');
+}
+
+/** Pick the Python interpreter: explicit override > bundled runtime > repo venv > PATH. */
+function pythonExecutable() {
+  if (process.env.MATH_TUTOR_PYTHON) return process.env.MATH_TUTOR_PYTHON;
+
+  const isWin = process.platform === 'win32';
+  const candidates = [
+    path.join(process.resourcesPath || '', 'python', isWin ? 'python.exe' : 'bin/python3'),
+    path.join(__dirname, '..', '..', 'venv', isWin ? 'Scripts/python.exe' : 'bin/python'),
+    path.join(__dirname, '..', '..', '.venv', isWin ? 'Scripts/python.exe' : 'bin/python'),
+  ];
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  return found || (isWin ? 'python' : 'python3');
+}
+
+function probeBackend(timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const req = http.get(`${BACKEND_URL}/health`, { timeout: timeoutMs }, (res) => {
+      res.resume();
+      resolve(res.statusCode === 200);
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
+function sendToRenderer(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
+
+function startBackendProcess() {
+  const cwd = backendDir();
+  const python = pythonExecutable();
+  const userData = app.getPath('userData');
+
+  // Runtime state must never be written inside the (read-only) install dir.
+  const env = {
+    ...process.env,
+    PYTHONUNBUFFERED: '1',
+    HOST: BACKEND_HOST,
+    PORT: String(BACKEND_PORT),
+    DEBUG: 'false',
+    ENVIRONMENT: app.isPackaged ? 'production' : 'development',
+    DATA_DIR: path.join(userData, 'data'),
+    LOG_DIR: path.join(userData, 'logs'),
+    UPLOAD_DIR: path.join(userData, 'uploads'),
+    TEMP_DIR: path.join(os.tmpdir(), 'ai-math-tutor'),
+    MODEL_DIR: process.env.MODEL_DIR || path.join(userData, 'models'),
+    MODEL_CACHE_DIR: process.env.MODEL_CACHE_DIR || path.join(userData, 'models', 'cache'),
+  };
+
+  log.info(`Starting backend: ${python} main.py (cwd=${cwd}, port=${BACKEND_PORT})`);
+  sendToRenderer('backend-status', { state: 'starting', url: BACKEND_URL });
+
+  const child = spawn(python, ['main.py'], { cwd, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  backendProcess = child;
+  backendOwnedByUs = true;
+
+  const forward = (level) => (chunk) => {
+    const text = chunk.toString().trimEnd();
+    if (!text) return;
+    log[level](`[backend] ${text}`);
+    sendToRenderer('backend-log', { level, text });
+  };
+  child.stdout.on('data', forward('info'));
+  child.stderr.on('data', forward('warn'));
+
+  child.on('error', (error) => {
+    log.error(`Backend failed to start: ${error.message}`);
+    sendToRenderer('backend-status', { state: 'error', message: `Could not start Python (${python}): ${error.message}` });
+  });
+  child.on('exit', (code, signal) => {
+    log.info(`Backend exited (code=${code}, signal=${signal})`);
+    if (backendProcess === child) backendProcess = null;
+    if (!quitting) sendToRenderer('backend-status', { state: 'stopped', code, signal });
+  });
+}
+
+async function waitForBackend(timeoutMs) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await probeBackend()) return true;
+    if (backendOwnedByUs && !backendProcess) return false; // crashed on startup
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
+
+async function ensureBackend() {
+  if (process.env.MATH_TUTOR_SKIP_BACKEND === '1') {
+    log.info('MATH_TUTOR_SKIP_BACKEND=1: not managing the backend');
+    return;
+  }
+  if (await probeBackend()) {
+    log.info(`Backend already running at ${BACKEND_URL}; reusing it`);
+    backendOwnedByUs = false;
+    sendToRenderer('backend-status', { state: 'ready', url: BACKEND_URL, managed: false });
+    return;
+  }
+  startBackendProcess();
+  const ready = await waitForBackend(BACKEND_START_TIMEOUT_MS);
+  if (ready) {
+    log.info('Backend is ready');
+    sendToRenderer('backend-status', { state: 'ready', url: BACKEND_URL, managed: true });
+  } else {
+    log.error('Backend did not become healthy in time');
+    sendToRenderer('backend-status', { state: 'error', message: 'The Python backend did not start. Check the logs.' });
+  }
+}
+
+function stopBackend() {
+  const child = backendProcess;
+  if (!child || !backendOwnedByUs) return Promise.resolve();
+  backendProcess = null;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch (_) {
+        /* already gone */
+      }
+      resolve();
+    }, 5000);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    try {
+      if (process.platform === 'win32') {
+        // SIGTERM is not delivered to Python on Windows; taskkill the tree instead.
+        spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
+      } else {
+        child.kill('SIGTERM');
+      }
+    } catch (error) {
+      log.warn(`Failed to signal backend: ${error.message}`);
+      resolve();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Window
+// ---------------------------------------------------------------------------
+
+function installContentSecurityPolicy() {
+  const devServer = isDev ? ` ${DEV_SERVER_URL} ${DEV_SERVER_URL.replace(/^http/, 'ws')}` : '';
+  const wsBackend = BACKEND_URL.replace(/^http/, 'ws');
+  const csp = [
+    "default-src 'self'",
+    // CRA dev server injects inline scripts / eval for HMR; production build does not need them.
+    `script-src 'self'${isDev ? " 'unsafe-inline' 'unsafe-eval'" : ''}${devServer}`,
+    "style-src 'self' 'unsafe-inline'", // MUI/emotion inject style tags
+    "font-src 'self' data:",
+    "img-src 'self' data: blob:",
+    "media-src 'self' data: blob:",
+    `connect-src 'self' ${BACKEND_URL} ${wsBackend}${devServer}`,
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'none'",
+  ].join('; ');
+
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] } });
+  });
+}
+
 function createWindow() {
-  const { width, height } = store.get('windowBounds');
-  const primaryDisplay = screen.getPrimaryDisplay();
-  const { workArea } = primaryDisplay;
+  const saved = store.get('windowBounds');
+  const { workArea } = screen.getPrimaryDisplay();
+  const width = Math.min(saved.width, workArea.width);
+  const height = Math.min(saved.height, workArea.height);
 
   mainWindow = new BrowserWindow({
-    width: Math.min(width, workArea.width - 100),
-    height: Math.min(height, workArea.height - 100),
-    minWidth: 800,
-    minHeight: 600,
-    x: workArea.x + (workArea.width - width) / 2,
-    y: workArea.y + (workArea.height - height) / 2,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      enableRemoteModule: false,
-      preload: path.join(__dirname, 'preload.js'),
-      webSecurity: true,
-      allowRunningInsecureContent: false,
-      experimentalFeatures: false,
-      // Content Security Policy
-      contentSecurityPolicy: {
-        defaultSrc: "'self'",
-        scriptSrc: "'self' 'unsafe-inline' 'unsafe-eval' http://localhost:3000",
-        styleSrc: "'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net",
-        fontSrc: "'self' https://fonts.gstatic.com https://fonts.googleapis.com",
-        imgSrc: "'self' data: https:",
-        connectSrc: "'self' ws://localhost:8000 wss://localhost:8000 http://localhost:8000 https://localhost:8000"
-      }
-    },
-    icon: path.join(__dirname, '../../assets/icon.ico'),
+    width,
+    height,
+    x: saved.x ?? Math.round(workArea.x + (workArea.width - width) / 2),
+    y: saved.y ?? Math.round(workArea.y + (workArea.height - height) / 2),
+    minWidth: 900,
+    minHeight: 640,
     show: false,
-    frame: true,
-    titleBarStyle: 'default',
-    backgroundColor: '#ffffff'
+    backgroundColor: '#f5f5f5',
+    icon: path.join(__dirname, '..', '..', 'assets', 'icon.ico'),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      spellcheck: false,
+    },
   });
 
-  // Load the app - always use development server for debugging
-  console.log('Loading app from development server: http://localhost:3000');
-  mainWindow.loadURL('http://localhost:3000');
-  mainWindow.webContents.openDevTools();
+  if (isDev) {
+    mainWindow.loadURL(DEV_SERVER_URL);
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+  } else {
+    mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'build', 'index.html'));
+  }
 
-  // Add console error logging
-  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
-    const levels = ['verbose', 'info', 'warning', 'error'];
-    console.log(`Renderer ${levels[level]}: ${message}`);
+  mainWindow.once('ready-to-show', () => mainWindow && mainWindow.show());
 
-    if (level === 2 || level === 3) { // warning or error
-      log.error(`Renderer ${levels[level]}: ${message}`);
-    }
+  // External links open in the OS browser, never inside the app.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const allowed = isDev ? url.startsWith(DEV_SERVER_URL) : url.startsWith('file://');
+    if (!allowed) event.preventDefault();
   });
 
-  // Add uncaught exception handler for renderer
-  mainWindow.webContents.on('crashed', () => {
-    console.error('Renderer process crashed');
-    log.error('Renderer process crashed');
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    log.error(`Renderer process gone: ${details.reason}`);
+  });
+  mainWindow.webContents.on('console-message', (_event, level, message) => {
+    if (level >= 2) log.warn(`[renderer] ${message}`);
   });
 
-  // Show window when ready
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-    log.info('Main window shown');
-  });
-
-  // Window state management
-  mainWindow.on('resize', () => {
-    const { width, height } = mainWindow.getBounds();
-    store.set('windowBounds', { width, height });
-  });
-
-  mainWindow.on('close', (e) => {
-    if (backendProcess) {
-      log.info('Shutting down backend server...');
-      backendProcess.kill('SIGTERM');
-      backendProcess = null;
-    }
-  });
-
+  let boundsTimer = null;
+  const persistBounds = () => {
+    clearTimeout(boundsTimer);
+    boundsTimer = setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMaximized()) {
+        store.set('windowBounds', mainWindow.getBounds());
+      }
+    }, 300);
+  };
+  mainWindow.on('resize', persistBounds);
+  mainWindow.on('move', persistBounds);
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
 }
 
-/**
- * Start the Python FastAPI backend server
- */
-function startBackendServer() {
-  const backendPath = path.join(__dirname, '../backend');
-  const pythonExecutable = process.platform === 'win32' ? 'python' : 'python3';
+// ---------------------------------------------------------------------------
+// IPC
+// ---------------------------------------------------------------------------
 
-  backendProcess = spawn(pythonExecutable, ['-m', 'uvicorn', 'main:app', '--host', '0.0.0.0', '--port', '8000'], {
-    cwd: backendPath,
-    env: { ...process.env, PYTHONPATH: backendPath }
-  });
+function setupIpc() {
+  ipcMain.handle('get-settings', () => ({ ...store.store, backendUrl: BACKEND_URL }));
 
-  backendProcess.stdout.on('data', (data) => {
-    log.info(`Backend: ${data}`);
-  });
-
-  backendProcess.stderr.on('data', (data) => {
-    log.error(`Backend Error: ${data}`);
-  });
-
-  backendProcess.on('close', (code) => {
-    log.info(`Backend process exited with code ${code}`);
-    backendProcess = null;
-  });
-}
-
-
-
-/**
- * Set up global keyboard shortcuts
- */
-function setupGlobalShortcuts() {
-  // F1 for help
-  globalShortcut.register('F1', () => {
-    if (mainWindow) {
-      mainWindow.webContents.send('show-help');
+  ipcMain.handle('update-settings', (_event, patch) => {
+    if (!patch || typeof patch !== 'object') return false;
+    for (const [key, value] of Object.entries(patch)) {
+      if (key === 'backendUrl') continue; // derived, not user-settable
+      store.set(key, value);
     }
-  });
-
-  // Ctrl+Shift+R for reload in development
-  if (isDev) {
-    globalShortcut.register('CommandOrControl+Shift+R', () => {
-      if (mainWindow) {
-        mainWindow.webContents.reload();
-      }
-    });
-  }
-
-  // Ctrl+Shift+I for dev tools in development
-  if (isDev) {
-    globalShortcut.register('CommandOrControl+Shift+I', () => {
-      if (mainWindow) {
-        mainWindow.webContents.toggleDevTools();
-      }
-    });
-  }
-}
-
-/**
- * IPC handlers for renderer process communication
- */
-function setupIPCHandlers() {
-  // Get app settings
-  ipcMain.handle('get-settings', () => {
-    return store.store;
-  });
-
-  // Update app settings
-  ipcMain.handle('update-settings', (event, settings) => {
-    store.set(settings);
     return true;
   });
 
-  // Open file dialog for loading images/diagrams
+  ipcMain.handle('get-backend-url', () => BACKEND_URL);
+  ipcMain.handle('get-app-version', () => app.getVersion());
+
+  ipcMain.handle('get-system-info', () => ({
+    platform: process.platform,
+    arch: process.arch,
+    version: app.getVersion(),
+    electronVersion: process.versions.electron,
+    nodeVersion: process.versions.node,
+    chromeVersion: process.versions.chrome,
+    isPackaged: app.isPackaged,
+    memory: { total: os.totalmem(), free: os.freemem() },
+    cpu: { model: os.cpus()[0]?.model || 'unknown', cores: os.cpus().length },
+  }));
+
   ipcMain.handle('open-file-dialog', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openFile'],
-      filters: [
-        { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'bmp'] },
-        { name: 'PDF Files', extensions: ['pdf'] }
-      ]
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'] }],
     });
-    return result;
+    return { canceled: result.canceled, filePaths: result.filePaths };
   });
 
-  // Save file dialog for exporting solutions
-  ipcMain.handle('save-file-dialog', async () => {
+  ipcMain.handle('save-file-dialog', async (_event, options) => {
+    if (!options || typeof options.data !== 'string') throw new Error('save-file requires { data }');
+    const encoding = options.encoding === 'base64' ? 'base64' : 'utf8';
+    const ext = path.extname(options.defaultPath || '').replace('.', '') || 'txt';
     const result = await dialog.showSaveDialog(mainWindow, {
-      filters: [
-        { name: 'PDF', extensions: ['pdf'] },
-        { name: 'PNG Image', extensions: ['png'] },
-        { name: 'Text', extensions: ['txt'] }
-      ]
+      defaultPath: options.defaultPath,
+      filters: [{ name: ext.toUpperCase(), extensions: [ext] }, { name: 'All files', extensions: ['*'] }],
     });
-    return result;
+    if (result.canceled || !result.filePath) return { canceled: true };
+    await fs.promises.writeFile(result.filePath, Buffer.from(options.data, encoding));
+    return { canceled: false, filePath: result.filePath };
   });
 
-  // Get system information
-  ipcMain.handle('get-system-info', () => {
-    return {
-      platform: process.platform,
-      arch: process.arch,
-      version: app.getVersion(),
-      electronVersion: process.versions.electron,
-      screens: screen.getAllDisplays()
-    };
-  });
-
-  // Restart backend server
-  ipcMain.handle('restart-backend', () => {
-    if (backendProcess) {
-      backendProcess.kill('SIGTERM');
+  ipcMain.handle('restart-backend', async () => {
+    if (!backendOwnedByUs && (await probeBackend())) {
+      log.info('Backend is externally managed; not restarting');
+      return false;
     }
-    startBackendServer();
+    await stopBackend();
+    await ensureBackend();
     return true;
+  });
+
+  ipcMain.handle('window-minimize', () => mainWindow?.minimize());
+  ipcMain.handle('window-maximize', () => (mainWindow?.isMaximized() ? mainWindow.unmaximize() : mainWindow?.maximize()));
+  ipcMain.handle('window-close', () => mainWindow?.close());
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+
+  app.whenReady().then(() => {
+    installContentSecurityPolicy();
+    setupIpc();
+    createWindow();
+    ensureBackend().catch((error) => log.error(`ensureBackend failed: ${error.message}`));
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+
+  app.on('before-quit', (event) => {
+    if (quitting || !backendProcess) return;
+    quitting = true;
+    event.preventDefault();
+    stopBackend().finally(() => app.quit());
   });
 }
 
-// App lifecycle events
-app.whenReady().then(() => {
-  log.info('App ready, creating window...');
-  createWindow();
-  setupGlobalShortcuts();
-  setupIPCHandlers();
-
-  // Start backend services
-  if (!isDev) {
-    startBackendServer();
-  }
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
-  });
-});
-
-app.on('window-all-closed', () => {
-  globalShortcut.unregisterAll();
-
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
-
-app.on('before-quit', () => {
-  // Clean up resources
-  if (backendProcess) {
-    backendProcess.kill('SIGTERM');
-  }
-});
-
-// Error handling
-process.on('uncaughtException', (error) => {
-  log.error('Uncaught Exception:', error);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  log.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
+process.on('uncaughtException', (error) => log.error('Uncaught exception:', error));
+process.on('unhandledRejection', (reason) => log.error('Unhandled rejection:', reason));

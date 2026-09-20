@@ -13,9 +13,11 @@ import io
 import base64
 
 import numpy as np
-import soundfile as sf
+
+from services.optional_deps import soundfile as sf, HAS_ML_STACK
 
 from config.settings import get_settings
+from services.common import utc_now_iso
 from services.model_config import ModelType, get_model_registry
 from services.enhanced_model_service import EnhancedModelService
 from services.vibevoice_service import VibeVoiceService
@@ -44,9 +46,12 @@ class AudioService:
             logger.info("Initializing Enhanced Audio Service...")
 
             # Create service instances but don't load models yet
-            self.model_service = EnhancedModelService(self.settings)
-            self.vibevoice_service = VibeVoiceService(self.settings)
-            self.meralion_service = MERaLiONService(self.settings)
+            if HAS_ML_STACK:
+                self.model_service = EnhancedModelService(self.settings)
+                self.vibevoice_service = VibeVoiceService(self.settings)
+                self.meralion_service = MERaLiONService(self.settings)
+            else:
+                logger.info("ML stack not installed; speech features report as unavailable")
 
             # Mark as initialized but models are not loaded yet
             self.is_initialized = True
@@ -167,10 +172,11 @@ class AudioService:
                         "language": language,
                         "processing_time": processing_time,
                         "model_used": "MERaLiON-AudioLLM-Whisper-SEA-LION",
+                        "available": True,
                         "educational_mode": enable_educational_mode,
                         "noise_reduction": noise_reduction,
                         "educational_terms": result.get("educational_terms", []),
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": utc_now_iso()
                     }
                 except Exception as e:
                     logger.warning(f"MERaLiON-AudioLLM failed: {e}, falling back to Whisper")
@@ -186,11 +192,13 @@ class AudioService:
                 "confidence": result.get("confidence", 0.0),
                 "language": language,
                 "processing_time": processing_time,
-                "model_used": "Whisper (fallback)",
+                "model_used": "none",
+                "available": result.get("available", False),
+                "message": result.get("message"),
                 "educational_mode": False,
                 "noise_reduction": False,
                 "educational_terms": [],
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -263,9 +271,10 @@ class AudioService:
                         "format": format,
                         "processing_time": processing_time,
                         "model_used": "Microsoft-VibeVoice-1.5B",
+                        "available": True,
                         "educational_optimization": result.get("educational_optimization", False),
                         "mathematical_expressions": result.get("mathematical_expressions", []),
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": utc_now_iso()
                     }
                 except Exception as e:
                     logger.warning(f"Microsoft VibeVoice failed: {e}, falling back to basic TTS")
@@ -287,10 +296,12 @@ class AudioService:
                 "volume": volume,
                 "format": format,
                 "processing_time": processing_time,
-                "model_used": "Basic TTS (fallback)",
+                "model_used": "none",
+                "available": result.get("available", False),
+                "message": result.get("message"),
                 "educational_optimization": False,
                 "mathematical_expressions": [],
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now_iso()
             }
 
         except Exception as e:
@@ -322,6 +333,8 @@ class AudioService:
                 audio_buffer = audio_data
 
             # Read audio data
+            if sf is None:
+                raise RuntimeError("Audio analysis requires the optional dependency 'soundfile'")
             audio_array, sample_rate = sf.read(audio_buffer)
 
             result = {}
@@ -338,7 +351,7 @@ class AudioService:
             result["analysis_type"] = analysis_type
             result["sample_rate"] = sample_rate
             result["duration"] = len(audio_array) / sample_rate
-            result["timestamp"] = datetime.utcnow().isoformat()
+            result["timestamp"] = utc_now_iso()
 
             return result
 
@@ -574,26 +587,17 @@ class AudioService:
             raise
 
     async def _mock_whisper_transcription(self, audio_buffer: io.BytesIO, language: str) -> Dict[str, Any]:
-        """Mock Whisper transcription for testing"""
-        # Simulate transcription
-        await asyncio.sleep(0.1)  # Simulate processing time
-
-        transcriptions = [
-            "What is the derivative of x squared plus two x plus one?",
-            "Solve for x in the equation x squared plus two x plus one equals zero.",
-            "Calculate the area of a circle with radius five.",
-            "Find the integral of two x plus three.",
-            "What is the square root of sixteen?"
-        ]
-
-        import random
-        text = random.choice(transcriptions)
-        confidence = random.uniform(0.85, 0.98)
-
+        """
+        No speech model is loaded. Return an explicit 'unavailable' result;
+        never fabricate a transcription.
+        """
         return {
-            "text": text,
-            "confidence": confidence,
-            "language": language
+            "text": "",
+            "confidence": 0.0,
+            "language": language,
+            "available": False,
+            "message": "Speech recognition needs the MERaLiON (or Whisper) model, which is not loaded. "
+                       "Type your question, or load a speech model from Settings.",
         }
 
     async def _mock_tts_generation(
@@ -604,26 +608,13 @@ class AudioService:
         speed: float,
         pitch: float
     ) -> Dict[str, Any]:
-        """Mock TTS generation for testing"""
-        # Simulate TTS processing
-        await asyncio.sleep(0.1)  # Simulate processing time
-
-        # Generate silent audio data (placeholder)
-        duration = len(text) * 0.1 / speed  # Rough estimate
-        sample_rate = self.settings.tts_sample_rate
-        samples = int(duration * sample_rate)
-
-        # Generate silent audio (16-bit PCM)
-        audio_data = np.zeros(samples, dtype=np.int16)
-
-        # Convert to base64
-        audio_bytes = audio_data.tobytes()
-        audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
-
+        """No TTS model is loaded: report that instead of returning silent audio."""
         return {
-            "audio_data": audio_b64,
-            "duration": duration,
-            "samples": samples
+            "audio_data": None,
+            "duration": 0.0,
+            "samples": 0,
+            "available": False,
+            "message": "Text-to-speech needs the VibeVoice model, which is not loaded.",
         }
 
     async def _detect_speech(self, audio_array: np.ndarray, sample_rate: int) -> Dict[str, Any]:

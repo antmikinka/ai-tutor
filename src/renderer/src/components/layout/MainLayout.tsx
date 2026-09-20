@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   Box,
@@ -8,110 +8,92 @@ import {
   IconButton,
   Drawer,
   List,
-  ListItem,
+  ListItemButton,
   ListItemIcon,
   ListItemText,
   useTheme,
   useMediaQuery,
   Divider,
-  Badge,
   Menu,
   MenuItem,
-  Avatar,
+  Tooltip,
 } from '@mui/material';
 import {
   Menu as MenuIcon,
   Calculate,
+  School,
   Settings,
   Help,
-  Mic,
-  MicOff,
-  VolumeUp,
-  VolumeOff,
   Fullscreen,
   FullscreenExit,
-  AccountCircle,
+  MoreVert,
+  RestartAlt,
 } from '@mui/icons-material';
 import { styled } from '@mui/material/styles';
-import { useWebSocket } from '../../hooks/useWebSocket';
-import { useAppSettings } from '../../hooks/useAppSettings';
+import ConnectionStatus from '../ConnectionStatus';
+import { QuickSettings } from '../QuickSettings';
+import { useSettingsContext } from '../../contexts/SettingsContext';
 
 const drawerWidth = 240;
 
-const Main = styled('main', { shouldForwardProp: (prop) => prop !== 'open' })<{
-  open?: boolean;
-}>(({ theme, open }) => ({
+const Main = styled('main')(({ theme }) => ({
   flexGrow: 1,
+  minWidth: 0,
   padding: theme.spacing(3),
-  transition: theme.transitions.create('margin', {
-    easing: theme.transitions.easing.sharp,
-    duration: theme.transitions.duration.leavingScreen,
-  }),
-  marginLeft: `-${drawerWidth}px`,
-  ...(open && {
-    transition: theme.transitions.create('margin', {
-      easing: theme.transitions.easing.easeOut,
-      duration: theme.transitions.duration.enteringScreen,
-    }),
-    marginLeft: 0,
-  }),
+  display: 'flex',
+  flexDirection: 'column',
 }));
+
+const menuItems = [
+  { text: 'Whiteboard', icon: <Calculate />, path: '/' },
+  { text: 'Practice', icon: <School />, path: '/practice' },
+  { text: 'Settings', icon: <Settings />, path: '/settings' },
+  { text: 'Help', icon: <Help />, path: '/help' },
+];
 
 interface MainLayoutProps {
   children: React.ReactNode;
 }
 
 export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
-  const [isAudioEnabled, setIsAudioEnabled] = useState(true);
-  const [isMicEnabled, setIsMicEnabled] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
   const navigate = useNavigate();
   const location = useLocation();
-  const { connectionStatus } = useWebSocket();
-  const { settings } = useAppSettings();
+  const { settings } = useSettingsContext();
 
-  const handleDrawerToggle = () => {
-    setDrawerOpen(!drawerOpen);
-  };
+  const [drawerOpen, setDrawerOpen] = useState(!isMobile);
+  const [menuAnchor, setMenuAnchor] = useState<null | HTMLElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(Boolean(document.fullscreenElement));
+  const [appVersion, setAppVersion] = useState<string>(settings.appVersion);
 
-  const handleMenuClick = (event: React.MouseEvent<HTMLElement>) => {
-    setAnchorEl(event.currentTarget);
-  };
+  useEffect(() => {
+    window.electronAPI?.getAppVersion().then(setAppVersion).catch(() => undefined);
+  }, []);
 
-  const handleMenuClose = () => {
-    setAnchorEl(null);
-  };
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
 
-  const toggleAudio = () => {
-    setIsAudioEnabled(!isAudioEnabled);
-  };
-
-  const toggleMic = () => {
-    setIsMicEnabled(!isMicEnabled);
-  };
-
-  const toggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen();
-      setIsFullscreen(true);
-    } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen();
-        setIsFullscreen(false);
+  const toggleFullscreen = async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
       }
+    } catch (error) {
+      console.warn('Fullscreen toggle failed:', error);
     }
   };
 
-  const menuItems = [
-    { text: 'Math Tutor', icon: <Calculate />, path: '/' },
-    { text: 'Settings', icon: <Settings />, path: '/settings' },
-    { text: 'Help', icon: <Help />, path: '/help' },
-  ];
+  const go = (path: string) => {
+    navigate(path);
+    setMenuAnchor(null);
+    if (isMobile) setDrawerOpen(false);
+  };
 
   const drawer = (
     <div>
@@ -123,20 +105,10 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       <Divider />
       <List>
         {menuItems.map((item) => (
-          <ListItem
-            button
-            key={item.text}
-            onClick={() => {
-              navigate(item.path);
-              if (isMobile) {
-                setDrawerOpen(false);
-              }
-            }}
-            selected={location.pathname === item.path}
-          >
+          <ListItemButton key={item.text} onClick={() => go(item.path)} selected={location.pathname === item.path}>
             <ListItemIcon>{item.icon}</ListItemIcon>
             <ListItemText primary={item.text} />
-          </ListItem>
+          </ListItemButton>
         ))}
       </List>
     </div>
@@ -147,19 +119,13 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       <AppBar
         position="fixed"
         sx={{
-          width: { md: `calc(100% - ${drawerOpen ? drawerWidth : 0}px)` },
-          ml: { md: `${drawerOpen ? 0 : -drawerWidth}px` },
+          width: { md: drawerOpen ? `calc(100% - ${drawerWidth}px)` : '100%' },
+          ml: { md: drawerOpen ? `${drawerWidth}px` : 0 },
           transition: 'width 0.3s, margin 0.3s',
         }}
       >
         <Toolbar>
-          <IconButton
-            color="inherit"
-            aria-label="open drawer"
-            edge="start"
-            onClick={handleDrawerToggle}
-            sx={{ mr: 2 }}
-          >
+          <IconButton color="inherit" aria-label="toggle navigation" edge="start" onClick={() => setDrawerOpen((o) => !o)} sx={{ mr: 2 }}>
             <MenuIcon />
           </IconButton>
 
@@ -167,116 +133,75 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             AI Math Tutor
           </Typography>
 
-          {/* Connection Status */}
-          <Box sx={{ display: 'flex', alignItems: 'center', mr: 2 }}>
-            <Badge
-              color={connectionStatus === 'connected' ? 'success' : 'error'}
-              variant="dot"
-              sx={{ mr: 1 }}
-            >
-              <Typography variant="body2" color="inherit">
-                {connectionStatus}
-              </Typography>
-            </Badge>
+          <Box sx={{ mr: 2 }}>
+            <ConnectionStatus compact={isMobile} />
           </Box>
 
-          {/* Audio Controls */}
-          <IconButton color="inherit" onClick={toggleAudio}>
-            {isAudioEnabled ? <VolumeUp /> : <VolumeOff />}
-          </IconButton>
+          <QuickSettings />
 
-          <IconButton color="inherit" onClick={toggleMic}>
-            {isMicEnabled ? <Mic /> : <MicOff />}
-          </IconButton>
+          <Tooltip title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+            <IconButton color="inherit" onClick={toggleFullscreen}>
+              {isFullscreen ? <FullscreenExit /> : <Fullscreen />}
+            </IconButton>
+          </Tooltip>
 
-          {/* Fullscreen Toggle */}
-          <IconButton color="inherit" onClick={toggleFullscreen}>
-            {isFullscreen ? <FullscreenExit /> : <Fullscreen />}
-          </IconButton>
-
-          {/* User Menu */}
-          <IconButton
-            size="large"
-            aria-label="account of current user"
-            aria-controls="menu-appbar"
-            aria-haspopup="true"
-            onClick={handleMenuClick}
-            color="inherit"
-          >
-            <Avatar sx={{ width: 32, height: 32 }}>
-              <AccountCircle />
-            </Avatar>
+          <IconButton size="large" aria-label="more options" aria-controls="menu-appbar" aria-haspopup="true" onClick={(e) => setMenuAnchor(e.currentTarget)} color="inherit">
+            <MoreVert />
           </IconButton>
 
           <Menu
             id="menu-appbar"
-            anchorEl={anchorEl}
-            anchorOrigin={{
-              vertical: 'top',
-              horizontal: 'right',
-            }}
-            keepMounted
-            transformOrigin={{
-              vertical: 'top',
-              horizontal: 'right',
-            }}
-            open={Boolean(anchorEl)}
-            onClose={handleMenuClose}
+            anchorEl={menuAnchor}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+            open={Boolean(menuAnchor)}
+            onClose={() => setMenuAnchor(null)}
           >
-            <MenuItem onClick={handleMenuClose}>
-              <AccountCircle sx={{ mr: 1 }} />
-              Profile
-            </MenuItem>
-            <MenuItem onClick={handleMenuClose}>
-              <Settings sx={{ mr: 1 }} />
+            <MenuItem onClick={() => go('/settings')}>
+              <Settings sx={{ mr: 1 }} fontSize="small" />
               Settings
             </MenuItem>
-            <MenuItem onClick={handleMenuClose}>
-              <Help sx={{ mr: 1 }} />
+            <MenuItem onClick={() => go('/help')}>
+              <Help sx={{ mr: 1 }} fontSize="small" />
               Help
             </MenuItem>
+            {window.electronAPI && (
+              <MenuItem
+                onClick={() => {
+                  setMenuAnchor(null);
+                  window.electronAPI?.restartBackend();
+                }}
+              >
+                <RestartAlt sx={{ mr: 1 }} fontSize="small" />
+                Restart backend
+              </MenuItem>
+            )}
             <Divider />
-            <MenuItem onClick={handleMenuClose}>
-              Version {settings?.appVersion || '1.0.0'}
-            </MenuItem>
+            <MenuItem disabled>Version {appVersion}</MenuItem>
           </Menu>
         </Toolbar>
       </AppBar>
 
-      {/* Mobile Drawer */}
       <Drawer
-        variant="temporary"
+        variant={isMobile ? 'temporary' : 'persistent'}
         open={drawerOpen}
-        onClose={handleDrawerToggle}
-        ModalProps={{
-          keepMounted: true,
-        }}
+        onClose={() => setDrawerOpen(false)}
+        ModalProps={{ keepMounted: true }}
         sx={{
-          display: { xs: 'block', md: 'none' },
+          // The persistent drawer's paper is position:fixed; the outer element must
+          // reserve the same width in the flex row or the content renders underneath it.
+          width: { xs: 0, md: drawerOpen ? drawerWidth : 0 },
+          flexShrink: 0,
+          transition: 'width 0.3s',
           '& .MuiDrawer-paper': { boxSizing: 'border-box', width: drawerWidth },
         }}
       >
         {drawer}
       </Drawer>
 
-      {/* Desktop Drawer */}
-      <Drawer
-        variant="persistent"
-        open={drawerOpen}
-        sx={{
-          display: { xs: 'none', md: 'block' },
-          '& .MuiDrawer-paper': { boxSizing: 'border-box', width: drawerWidth },
-        }}
-      >
-        {drawer}
-      </Drawer>
-
-      {/* Main Content */}
-      <Main open={drawerOpen}>
+      <Main>
         <Toolbar />
-        <Box sx={{ height: 'calc(100vh - 64px)', overflow: 'auto' }}>
-          {children}
-        </Box>
+        <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>{children}</Box>
       </Main>
     </Box>
   );
